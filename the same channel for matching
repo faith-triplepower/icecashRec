@@ -1,0 +1,45 @@
+[33mcommit 3ec66106b9f9ba53b32c35c40676b872a8a61fe2[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: faith-triplepower <faith-triplepower.co.zw>
+Date:   Fri Apr 17 11:35:11 2026 +0200
+
+    Fix matching engine: channel normalization + batch matching rewrite
+    
+    - iPOS and Bank POS now treated as the same channel for matching
+      (sales use 'iPOS', receipts use 'Bank POS' — same money flow)
+    - Tier 5 rewritten: greedily sums unmatched sales per receipt
+      instead of matching daily totals (handles partial bank batches)
+    - Channel normalization applied to Tiers 2, 3, 4, and 5
+    - Skip noise rows during ingestion (Opening Balance, Closing, Totals)
+    - Allow application/CDFV2 MIME type for old .xls files
+    - Add CSRF token to delete upload fetch() calls
+    
+    Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+[33mcommit 07ae56e0c422e3a1867d4f6a69641160c6d7a899[m
+Author: faith-triplepower <faith-triplepower.co.zw>
+Date:   Fri Apr 17 11:03:48 2026 +0200
+
+    updated the delete functionality for process uploads
+
+[33mcommit 57ac8b554e2b890df2f31c22db3e9b97df266556[m
+Author: faithndlovu <nfaithlubelihle@gmail.com>
+Date:   Fri Apr 17 08:35:07 2026 +0200
+
+    Initial release — IceCashRec v1.0
+    
+    Zimnat General Insurance finance reconciliation system.
+    
+    Features:
+    - Multi-format file ingestion (CSV, XLS, XLSX, PDF)
+    - 5-tier matching engine (exact, amount+date, fuzzy, split, batch)
+    - Variance reporting with Ready/Attention/All triage tabs
+    - Formal statement lifecycle with maker-checker approval
+    - Escalation queue for managers
+    - CSRF, rate limiting, 2FA, session hardening, password policy
+    - Global search, CSV export, bulk actions
+    - Dashboard with Chart.js trends
+    - Role-based access (Uploader, Reconciler, Manager, Admin)
+    
+    Stack: PHP 7.2 + MySQL + Bootstrap 3 + Font Awesome 6
+    
+    Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

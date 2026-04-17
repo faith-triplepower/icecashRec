@@ -1,5 +1,5 @@
 # Database credentials — never commit these
-core/config.php
+
 
 # Uploaded files (data goes to DB, not disk)
 uploads/
