@@ -1,0 +1,273 @@
+@import url('https://fonts.googleapis.com/css?family=Open+Sans:400,700');
+
+@keyframes spinner {
+    0%   { transform: rotateZ(0deg); }
+    100% { transform: rotateZ(359deg); }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: "Open Sans", sans-serif;
+    background: url("../img/bgt.jpg") center/cover no-repeat fixed;
+    min-height: 100vh;
+    position: relative;
+}
+
+/* Overlay on top of image */
+body::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+
+    background: rgba(0, 0, 0, 0.4);
+
+    z-index: 0; 
+}
+
+/* ── Outer wrapper ── */
+.wrapper {
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    justify-content: center;
+    width: 100%;
+    min-height: 100vh;
+    padding: 20px;
+      position: relative;
+    z-index: 1;
+}
+/* Brand styling  */
+.brand {
+    text-align: center;
+    margin-bottom: 25px;
+}
+
+/* PNG Logo  */
+.brand-image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    margin: 0 auto 12px auto;
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.1));
+    transition: all 0.3s ease;
+}
+
+.brand-image:hover {
+    transform: scale(1.05);
+    filter: drop-shadow(0 4px 12px rgba(0, 169, 80, 0.3));
+}
+
+/* Brand text  */
+.brand-logo {
+    font-size: 32px;
+    font-weight: 700;
+    color: #1e293b;
+    letter-spacing: -1px;
+    line-height: 1;
+    margin-top: 8px;
+}
+
+.brand-logo span { 
+    color: #00a950;
+}
+
+.brand-sub {
+    font-size: 10px;
+    color: #64748b;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 5px;
+}
+
+/*  subtle animation on page load */
+@keyframes fadeInDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.brand {
+    animation: fadeInDown 0.5s ease-out;
+}
+
+/*  Responsive adjustments */
+@media (max-width: 480px) {
+    .brand-image {
+        width: 60px;
+        height: 60px;
+    }
+    
+    .brand-logo {
+        font-size: 28px;
+    }
+    
+    .brand-sub {
+        font-size: 9px;
+        letter-spacing: 1.5px;
+    }
+}
+
+/* ── Login card ── */
+.login {
+    border-radius: 2px 2px 5px 5px;
+    padding: 20px 20px 80px 20px;
+    width: 90%;
+    max-width: 340px;
+    background: #ffffff;
+    position: relative;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+}
+
+.login .title {
+    color: #444;
+    font-size: 1.1em;
+    font-weight: bold;
+    margin: 0 0 20px 0;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 16px;
+    text-align: center;
+}
+
+/* ── Inputs ── */
+.login input {
+    display: block;
+    padding: 15px 10px;
+    margin-bottom: 10px;
+    width: 100%;
+    border: 1px solid #ddd;
+    transition: border-width 0.2s ease;
+    border-radius: 2px;
+    color: #ccc;
+    font-family: \"Open Sans\", sans-serif;
+    font-size: 13px;
+}
+.login input + i.fa {
+    color: #fff;
+    font-size: 1em;
+    position: absolute;
+    margin-top: -47px;
+    opacity: 0;
+    left: 0;
+    transition: all 0.1s ease-in;
+}
+.login input:focus {
+    outline: none;
+    color: #444;
+    border-color: #00a950;
+    border-left-width: 35px;
+}
+.login input:focus + i.fa {
+    opacity: 1;
+    left: 30px;
+    transition: all 0.25s ease-out;
+}
+.login input::placeholder { color: #bbb; }
+
+/* ── Error message ── */
+.error-msg {
+    background: #fde8ea;
+    border: 1px solid #f5b3bb;
+    color: #c0392b;
+    border-radius: 3px;
+    padding: 8px 12px;
+    font-size: 12px;
+    margin-bottom: 12px;
+}
+
+/* ── Submit button ── */
+.login button {
+    width: 100%;
+    height: 100%;
+    padding: 10px;
+    background: #00a950;
+    color: #fff;
+    display: block;
+    border: none;
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    max-height: 60px;
+    border-radius: 0 0 2px 2px;
+    border-bottom: 7px solid #00a950;
+    transition: all 0.1s ease-out;
+    font-size: 14px;
+    font-family: \"Open Sans\", sans-serif;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+}
+.login button .spinner {
+    display: block;
+    width: 40px;
+    height: 40px;
+    position: absolute;
+    border: 4px solid #ffffff;
+    border-top-color: rgba(255,255,255,0.3);
+    border-radius: 100%;
+    left: 50%;
+    top: 0;
+    opacity: 0;
+    margin-left: -20px;
+    margin-top: -20px;
+    animation: spinner 0.6s infinite linear;
+    transition: top 0.3s 0.3s ease, opacity 0.3s 0.3s ease, border-radius 0.3s ease;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.2);
+}
+.login:not(.loading) button:hover { box-shadow: 0 1px 3px #1a56db; }
+.login:not(.loading) button:focus { border-bottom-width: 4px; }
+
+/* ── Demo credentials box ── */
+.demo-box {
+    margin-top: 16px;
+    padding: 14px;
+    background: rgba(248,250,252,0.6);
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    width: 90%;
+    max-width: 340px;
+}
+.demo-title {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #64748b;
+    margin-bottom: 10px;
+}
+.demo-account {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid #e2e8f0;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.demo-account:last-child { border-bottom: none; }
+.demo-account:hover { opacity: 0.75; }
+.demo-user  { font-size: 12px; font-weight: 600; color: #1e293b; }
+.demo-creds { font-family: monospace; font-size: 10px; color: #475569; }
+.demo-role  {
+    font-size: 10px;
+    color: #1e293b;
+    background: rgba(0,0,0,0.06);
+    padding: 2px 7px;
+    border-radius: 3px;
+}
+
+/* ── Footer ── */
+footer {
+    padding-top: 20px;
+    text-align: center;
+    color: rgb(96, 96, 252);
+    font-size: 11px;
+}

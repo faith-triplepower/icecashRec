@@ -1,0 +1,27 @@
+# Database credentials — never commit these
+core/config.php
+
+# Uploaded files (data goes to DB, not disk)
+uploads/
+
+# Backups (large SQL dumps)
+backups/
+
+# Debug/temp files
+escalate_debug.log
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# XAMPP temp
+/tmp/
+exports/
