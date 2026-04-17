@@ -949,6 +949,15 @@ if (!function_exists('insert_receipts_rows')) {
             if (empty($terminal)) $terminal = null;
             if (empty($src))      $src = $source_name;
 
+            // Skip noise rows that banks put in their statements
+            // (opening/closing balances, totals, page headers, etc.)
+            $ref_lower = strtolower($ref);
+            if (strpos($ref_lower, 'opening') !== false || strpos($ref_lower, 'closing') !== false
+                || strpos($ref_lower, 'balance') !== false || strpos($ref_lower, 'total') !== false
+                || strpos($ref_lower, 'brought forward') !== false || strpos($ref_lower, 'carried forward') !== false) {
+                continue;
+            }
+
             // Extract terminal ID from description text (CBZ: "TID:40091364")
             if (empty($terminal) && !empty($ref)) {
                 if (preg_match('/TID[:\s]*(\d{6,})/', $ref, $tid_m)) {

@@ -287,16 +287,32 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
     $fx_flagged     = 0;
     $matched_sale_ids = array();  // Track which sales are already claimed across tiers
 
-    // Build indexes once
+    // Channel normalization: iPOS, Bank POS, and POS Terminal are all
+    // the same money flow — just labeled differently by Icecash vs banks.
+    // This function maps them to a common key so they can match.
+    $norm_channel = function($ch) {
+        $ch = strtolower(trim($ch));
+        if (strpos($ch, 'ipos') !== false || strpos($ch, 'bank pos') !== false
+            || strpos($ch, 'pos') !== false || strpos($ch, 'card') !== false) return 'POS';
+        if (strpos($ch, 'ecocash') !== false || strpos($ch, 'eco') !== false) return 'EcoCash';
+        if (strpos($ch, 'zimswitch') !== false) return 'Zimswitch';
+        if (strpos($ch, 'broker') !== false || strpos($ch, 'transfer') !== false) return 'Broker';
+        return 'POS'; // default — most transactions flow through POS
+    };
+
+    // Build indexes once — we normalize channels so iPOS sales match Bank POS receipts
     $by_id = array();                  // receipt_id → receipt (mutable status)
-    $by_key = array();                 // "amount_channel_date" → [ids]
-    $by_date_channel = array();        // "date_channel" → [ids] (for split + fuzzy)
+    $by_key = array();                 // "amount_normChannel_date" → [ids]
+    $by_date_channel = array();        // "date_normChannel" → [ids]
+    $by_date = array();                // "date" → [ids] (for batch matching)
     foreach ($receipts as $r) {
         $by_id[$r['id']] = $r;
-        $k = $r['amount'] . '_' . $r['channel'] . '_' . $r['txn_date'];
+        $nch = $norm_channel($r['channel']);
+        $k = $r['amount'] . '_' . $nch . '_' . $r['txn_date'];
         $by_key[$k][] = $r['id'];
-        $dc = $r['txn_date'] . '_' . $r['channel'];
+        $dc = $r['txn_date'] . '_' . $nch;
         $by_date_channel[$dc][] = $r['id'];
+        $by_date[$r['txn_date']][] = $r['id'];
     }
 
     $upd = $db->prepare(
@@ -378,7 +394,8 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
     foreach ($sales as $sale) {
         if (isset($matched_sale_ids[$sale['id']])) continue;
         if ($sale['amount'] <= 0) continue;
-        $k = $sale['amount'] . '_' . $sale['payment_method'] . '_' . $sale['txn_date'];
+        // Use normalized channel so iPOS sales match Bank POS receipts
+        $k = $sale['amount'] . '_' . $norm_channel($sale['payment_method']) . '_' . $sale['txn_date'];
         if (!isset($by_key[$k])) continue;
 
         foreach ($by_key[$k] as $rid) {
@@ -416,7 +433,7 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
         );
         $best_rid = null; $best_diff = PHP_INT_MAX;
         foreach ($dates as $d) {
-            $dc = $d . '_' . $sale['payment_method'];
+            $dc = $d . '_' . $norm_channel($sale['payment_method']);
             if (!isset($by_date_channel[$dc])) continue;
             foreach ($by_date_channel[$dc] as $rid) {
                 if ($by_id[$rid]['match_status'] !== 'pending') continue;
@@ -445,7 +462,7 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
         if ($sale['amount'] <= 0) continue;
         $sale_amt = (float)$sale['amount'];
 
-        $dc = $sale['txn_date'] . '_' . $sale['payment_method'];
+        $dc = $sale['txn_date'] . '_' . $norm_channel($sale['payment_method']);
         if (!isset($by_date_channel[$dc])) continue;
 
         $pool = array();
@@ -483,45 +500,58 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
     }
 
     // ── Tier 5: Reverse batch matching (1 receipt → many sales) ──
-    // Bank settlements often aggregate: one CBZ receipt for ZWG 51,660
-    // covers 67 individual IceCash sales on the same date. Group
-    // unmatched sales by date, sum them, and check if any unmatched
-    // receipt matches the daily total (within tolerance).
+    // Bank settlements aggregate many individual IceCash sales into
+    // one deposit. For each unmatched receipt, we greedily sum
+    // unmatched sales on the same date (±1 day) until we hit the
+    // receipt amount. If we reach it within tolerance, claim them all.
     set_progress($db, $run_id, 82, 'Tier 5: batch settlement matching');
 
-    // Group unmatched sales by date
-    $sales_by_date = array();
-    foreach ($sales as $sale) {
-        if (isset($matched_sale_ids[$sale['id']])) continue;
-        if ($sale['amount'] <= 0) continue;
-        $d = $sale['txn_date'];
-        if (!isset($sales_by_date[$d])) $sales_by_date[$d] = array('ids' => array(), 'total' => 0);
-        $sales_by_date[$d]['ids'][] = $sale['id'];
-        $sales_by_date[$d]['total'] += (float)$sale['amount'];
+    $amt_tol = max(5.0, 0.001 * 100); // ZWG 5 tolerance
+
+    // Sort unmatched receipts by amount descending (largest batches first)
+    $unmatched_rids = array();
+    foreach ($by_id as $rid => $r) {
+        if ($r['match_status'] === 'pending') $unmatched_rids[] = $rid;
     }
+    usort($unmatched_rids, function($a, $b) use ($by_id) {
+        return $by_id[$b]['amount'] - $by_id[$a]['amount'];
+    });
 
-    // For each date group, look for a single receipt that matches the sum
-    $amt_tol = 5.0; // tolerance in ZWG
-    foreach ($sales_by_date as $date => $group) {
-        if (count($group['ids']) < 2) continue; // need at least 2 sales to be a batch
-        $target = $group['total'];
+    foreach ($unmatched_rids as $rid) {
+        if ($by_id[$rid]['match_status'] !== 'pending') continue;
+        $r_amt  = (float)$by_id[$rid]['amount'];
+        $r_date = $by_id[$rid]['txn_date'];
+        if ($r_amt < 100) continue; // too small to be a batch
 
-        // Find unmatched receipts on the same date (±1 day)
-        foreach ($by_id as $rid => $receipt) {
-            if ($receipt['match_status'] !== 'pending') continue;
-            $r_amt = (float)$receipt['amount'];
-            $r_date = $receipt['txn_date'];
-            $day_diff = abs((strtotime($r_date) - strtotime($date)) / 86400);
+        // Collect unmatched sales on the same date (±1 day), sorted by amount desc
+        $pool = array();
+        foreach ($sales as $sale) {
+            if (isset($matched_sale_ids[$sale['id']])) continue;
+            if ($sale['amount'] <= 0) continue;
+            $day_diff = abs((strtotime($sale['txn_date']) - strtotime($r_date)) / 86400);
             if ($day_diff > 1) continue;
-            if (abs($r_amt - $target) <= $amt_tol) {
-                // Match! Link this one receipt to all the sales in the group
-                foreach ($group['ids'] as $sid) {
-                    $matched_sale_ids[$sid] = true;
-                }
-                $claim($rid, array('id' => $group['ids'][0], 'policy_number' => 'BATCH-' . $date), 'medium', 'matched');
-                $matched_count += count($group['ids']);
-                break;
+            $pool[] = array('id' => $sale['id'], 'amt' => (float)$sale['amount']);
+        }
+        if (count($pool) < 2) continue;
+        usort($pool, function($a, $b) { return $b['amt'] - $a['amt']; });
+
+        // Greedy sum: add sales until we hit the receipt amount
+        $running = 0;
+        $batch_ids = array();
+        foreach ($pool as $s) {
+            if ($running + $s['amt'] > $r_amt + $amt_tol) continue; // skip if would overshoot
+            $running += $s['amt'];
+            $batch_ids[] = $s['id'];
+            if (abs($running - $r_amt) <= $amt_tol) break; // we hit the target
+        }
+
+        // Did we match?
+        if (abs($running - $r_amt) <= $amt_tol && count($batch_ids) >= 2) {
+            foreach ($batch_ids as $sid) {
+                $matched_sale_ids[$sid] = true;
             }
+            $claim($rid, array('id' => $batch_ids[0], 'policy_number' => 'BATCH-' . $r_date . '-' . count($batch_ids)), 'medium', 'matched');
+            $matched_count += count($batch_ids);
         }
     }
 
