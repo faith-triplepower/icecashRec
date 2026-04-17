@@ -25,3 +25,4 @@ desktop.ini
 # XAMPP temp
 /tmp/
 exports/
+core/config.php 
