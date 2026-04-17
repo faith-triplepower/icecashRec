@@ -275,7 +275,7 @@ function deleteFile() {
     fetch('../process/delete_upload.php', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'upload_id=<?= $upload_id ?>'
+      body: 'upload_id=<?= $upload_id ?>&_csrf=<?= csrf_token() ?>'
     })
     .then(r => r.text())
     .then(msg => {

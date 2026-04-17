@@ -162,7 +162,10 @@ function process_one_upload($db, $file, $file_type, $report_type, $source_name, 
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'application/zip', 'application/octet-stream',
         'application/pdf', 'application/xml', 'text/xml', 'text/html',
-        'message/rfc822', // MHTML exports
+        'message/rfc822',       // MHTML exports from banks
+        'application/CDFV2',    // Old .xls files (Compound Document Format V2)
+        'application/x-ole-storage', // Another way PHP reports .xls files
+        'application/compound', // Yet another OLE2 variant
     );
     $finfo = new finfo(FILEINFO_MIME_TYPE);
     $detected_mime = $finfo->file($file['tmp_name']);
