@@ -123,13 +123,14 @@ function score_pair($sale, $receipt, $agent_tokens_by_id) {
     $sale_numbers    = $sale['_numbers'];
     $receipt_numbers = $receipt['_numbers'];
     if (!empty($sale_numbers) && !empty($receipt_numbers)) {
-        $sale_norm    = $sale['_numbers_norm'];
-        $receipt_norm = $receipt['_numbers_norm'];
+        $sale_norm       = $sale['_numbers_norm'];
+        $receipt_norm_set = $receipt['_numbers_norm_set']; // flipped: value => key
 
-        // Strong: exact shared 7+ digit ID (after leading-zero normalization)
+        // Strong: exact shared 7+ digit ID (after leading-zero normalization).
+        // isset() on the flipped set is O(1) vs in_array()'s O(N).
         $strong = false;
         foreach ($sale_norm as $nn) {
-            if (strlen($nn) >= 7 && in_array($nn, $receipt_norm, true)) {
+            if (strlen($nn) >= 7 && isset($receipt_norm_set[$nn])) {
                 $strong = true; break;
             }
         }
@@ -139,7 +140,7 @@ function score_pair($sale, $receipt, $agent_tokens_by_id) {
         } else {
             $medium = false;
             foreach ($sale_norm as $nn) {
-                if (strlen($nn) >= 4 && in_array($nn, $receipt_norm, true)) {
+                if (strlen($nn) >= 4 && isset($receipt_norm_set[$nn])) {
                     $medium = true; break;
                 }
             }
@@ -205,7 +206,6 @@ function score_pair($sale, $receipt, $agent_tokens_by_id) {
 function precompute_match_fields(&$sales, &$receipts, $agent_name_by_id, &$agent_tokens_by_id) {
     $norm_num = function($n) { $s = ltrim((string)$n, '0'); return $s === '' ? '0' : $s; };
 
-    $t0 = microtime(true);
     foreach ($sales as $k => $s) {
         $ts = @strtotime((string)($s['txn_date'] ?? ''));
         $sales[$k]['_ts']   = $ts ?: 0;
@@ -218,9 +218,10 @@ function precompute_match_fields(&$sales, &$receipts, $agent_name_by_id, &$agent
         // Only 4+ char tokens are usable; score_pair assumes they're prefiltered.
         $sales[$k]['_tokens'] = $toks; // match_tokens already enforces len>=4
 
-        $nums = match_numbers(($s['reference_no'] ?? '') . ' ' . ($s['policy_number'] ?? ''));
+        $nums      = match_numbers(($s['reference_no'] ?? '') . ' ' . ($s['policy_number'] ?? ''));
+        $nums_norm = array_map($norm_num, $nums);
         $sales[$k]['_numbers']      = $nums;
-        $sales[$k]['_numbers_norm'] = array_map($norm_num, $nums);
+        $sales[$k]['_numbers_norm'] = $nums_norm;
 
         $sales[$k]['_term']      = strtoupper(trim((string)($s['terminal_id'] ?? '')));
         $sales[$k]['_chan_norm'] = match_normalize_channel($s['payment_method'] ?? '');
@@ -235,9 +236,14 @@ function precompute_match_fields(&$sales, &$receipts, $agent_name_by_id, &$agent
         $blob_raw = (string)($r['reference_no'] ?? '') . ' ' . (string)($r['source_name'] ?? '');
         $receipts[$k]['_text_upper'] = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $blob_raw));
 
-        $nums = match_numbers(($r['reference_no'] ?? '') . ' ' . ($r['source_name'] ?? ''));
+        $nums      = match_numbers(($r['reference_no'] ?? '') . ' ' . ($r['source_name'] ?? ''));
+        $nums_norm = array_map($norm_num, $nums);
         $receipts[$k]['_numbers']      = $nums;
-        $receipts[$k]['_numbers_norm'] = array_map($norm_num, $nums);
+        $receipts[$k]['_numbers_norm'] = $nums_norm;
+        // Hash-set of normalized numbers so score_pair can test membership in
+        // O(1) with isset() instead of in_array() — the number-intersection
+        // check used to be the costliest part of the scoring inner loop.
+        $receipts[$k]['_numbers_norm_set'] = $nums_norm ? array_flip($nums_norm) : array();
 
         $receipts[$k]['_term']         = strtoupper(trim((string)($r['terminal_id'] ?? '')));
         $receipts[$k]['_chan_norm']    = match_normalize_channel($r['channel'] ?? '');
@@ -256,8 +262,6 @@ function precompute_match_fields(&$sales, &$receipts, $agent_name_by_id, &$agent
         }
         if (!empty($out)) $agent_tokens_by_id[(int)$id] = $out;
     }
-    fprintf(STDERR, "[precompute] %d sales, %d receipts, %d agents in %.2fs\n",
-        count($sales), count($receipts), count($agent_tokens_by_id), microtime(true) - $t0);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -305,7 +309,6 @@ function do_claim($db, $upd, $flag_sale, $sale, $receipt, $confidence, $policy_o
 // ─────────────────────────────────────────────────────────────
 
 function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_filter, $opts, $sales_upload_ids = array(), $receipts_upload_ids = array()) {
-    $t_bench = microtime(true);
 
     // ── Thresholds ──
     $AUTO_THRESHOLD      = 50;
@@ -431,17 +434,31 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // Single-candidate matches still get 'high' confidence; multi-candidate
     // matches get 'medium' since any specific pairing is arbitrary.
     // ═══════════════════════════════════════════════════════════
-    $pt = microtime(true); fprintf(STDERR, "[timing] pre-pass0 setup: %.2fs\n", $pt - $t_bench);
     set_progress($db, $run_id, 30, 'Pass 0: exact same-day matches');
 
-    // Index sales by (amount, date) for O(1) lookup
+    // Build three sale indexes once, reused by passes 0/2/3/4:
+    //   $by_amt_date  — "rounded_amt|date"  → [sale, ...]   (exact-pair lookups)
+    //   $by_amt       — rounded_amt         → [sale, ...]   (lonely-receipt / lonely-sale)
+    //   $by_date      — "Y-m-d"             → [sale, ...]   (batch settlement pool)
+    // Each sale gets referenced (small memory overhead — just array keys, not
+    // copied rows, because PHP arrays are COW).
     $by_amt_date = array();
+    $by_amt      = array();
+    $by_date     = array();
+    $by_amt_bucket = array(); // (int)floor(amt) => [sale, ...]  — Pass 1/6 range scans
     foreach ($sales as $sale) {
-        $a = round((float)($sale['amount'] ?? 0), 2);
+        $amt_raw = $sale['_amt'];
+        $a = round($amt_raw, 2);
         $d = (string)($sale['txn_date'] ?? '');
         if ($a <= 0 || $d === '') continue;
-        $key = $a . '|' . $d;
-        $by_amt_date[$key][] = $sale;
+        $by_amt_date[$a . '|' . $d][] = $sale;
+        $by_amt[(string)$a][] = $sale;
+        $by_date[$d][] = $sale;
+        // Integer-floor bucketing: a receipt with amount 985.76 only needs to
+        // scan buckets 966..1005 instead of the full 35K-row array. Passes 1
+        // and 6 were spending most of their time on foreach-skip overhead
+        // because sales sorted by amount still forces a linear walk.
+        $by_amt_bucket[(int)$amt_raw][] = $sale;
     }
     foreach ($receipts as $receipt) {
         if (isset($claimed_receipts[$receipt['id']])) continue;
@@ -468,7 +485,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 1 — MAIN SCORING
     // ═══════════════════════════════════════════════════════════
-    fprintf(STDERR, "[timing] pass 0: %.2fs\n", microtime(true) - $pt); $pt = microtime(true);
     set_progress($db, $run_id, 40, 'Pass 1: scoring pass');
 
     $processed = 0;
@@ -504,29 +520,37 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         $amt_tol = match_amount_tolerance($r_amt);
         $amt_lo  = $r_amt - $amt_tol;
         $amt_hi  = $r_amt + $amt_tol;
+        $bucket_lo = (int)$amt_lo;
+        $bucket_hi = (int)$amt_hi;
 
         $best_score = -1; $best_sale = null;
         $scored = 0;
-        foreach ($sales as $sale) {
+        // Walk only the integer amount buckets that overlap the tolerance
+        // window. On a 35K-sale dataset this reduces each receipt's scan
+        // from ~35,000 rows to ~the number of sales in 40-ish dollar
+        // buckets (usually a few hundred at most).
+        for ($b = $bucket_lo; $b <= $bucket_hi; $b++) {
             if ($scored >= $MAX_CANDIDATES) break;
-            $s_amt = $sale['_amt'];
-            if ($s_amt < $amt_lo) continue;
-            if ($s_amt > $amt_hi) break;
-            if ($s_amt <= 0) continue;
-            if (isset($claimed_sales[$sale['id']])) continue;
-            $s_ts = $sale['_ts'];
-            if (!$s_ts) continue;
-            if ($s_ts > $r_ts ? ($s_ts - $r_ts) > $date_window_secs
-                               : ($r_ts - $s_ts) > $date_window_secs) continue;
+            if (!isset($by_amt_bucket[$b])) continue;
+            foreach ($by_amt_bucket[$b] as $sale) {
+                if ($scored >= $MAX_CANDIDATES) break;
+                $s_amt = $sale['_amt'];
+                if ($s_amt < $amt_lo || $s_amt > $amt_hi) continue;
+                if ($s_amt <= 0) continue;
+                if (isset($claimed_sales[$sale['id']])) continue;
+                $s_ts = $sale['_ts'];
+                if (!$s_ts) continue;
+                if ($s_ts > $r_ts ? ($s_ts - $r_ts) > $date_window_secs
+                                  : ($r_ts - $s_ts) > $date_window_secs) continue;
 
-            try {
-                list($score, $_) = score_pair($sale, $receipt, $agent_tokens_by_id);
-            } catch (Throwable $e) { continue; }
-            $scored++;
+                try {
+                    list($score, $_) = score_pair($sale, $receipt, $agent_tokens_by_id);
+                } catch (Throwable $e) { continue; }
+                $scored++;
 
-            if ($score > $best_score) { $best_score = $score; $best_sale = $sale; }
-            // Shortcut: if we already hit a high-confidence score, stop scoring
-            if ($best_score >= $HIGH_CONF_THRESHOLD) break;
+                if ($score > $best_score) { $best_score = $score; $best_sale = $sale; }
+                if ($best_score >= $HIGH_CONF_THRESHOLD) break 2;
+            }
         }
 
         if ($best_sale !== null && $best_score >= $AUTO_THRESHOLD) {
@@ -542,10 +566,17 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 2 — LONELY RECEIPT: one exact-amount candidate in ±14 days
     // ═══════════════════════════════════════════════════════════
-    fprintf(STDERR, "[timing] pass 1: %.2fs\n", microtime(true) - $pt); $pt = microtime(true);
     set_progress($db, $run_id, 72, 'Pass 2: lonely-receipt pass');
 
     $lonely_secs = $LONELY_WINDOW_DAYS * 86400;
+
+    // Build an amount-indexed receipt map so Pass 3 doesn't rescan all receipts.
+    $receipts_by_amt = array();
+    foreach ($receipts as $receipt) {
+        $a = round($receipt['_amt'], 2);
+        if ($a <= 0) continue;
+        $receipts_by_amt[(string)$a][] = $receipt;
+    }
 
     foreach ($receipts as $receipt) {
         if (isset($claimed_receipts[$receipt['id']])) continue;
@@ -554,11 +585,12 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         $r_ts = $receipt['_ts'];
         if (!$r_ts) continue;
 
+        $bucket = isset($by_amt[(string)$r_amt]) ? $by_amt[(string)$r_amt] : null;
+        if ($bucket === null) continue;
+
         $cands = array();
-        foreach ($sales as $sale) {
+        foreach ($bucket as $sale) {
             if (isset($claimed_sales[$sale['id']])) continue;
-            $s_amt = round($sale['_amt'], 2);
-            if ($s_amt !== $r_amt) continue;
             $s_ts = $sale['_ts'];
             if (!$s_ts) continue;
             $dt = $s_ts > $r_ts ? $s_ts - $r_ts : $r_ts - $s_ts;
@@ -577,7 +609,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 3 — LONELY SALE: one exact-amount unmatched receipt in ±14 days
     // ═══════════════════════════════════════════════════════════
-    fprintf(STDERR, "[timing] pass 2: %.2fs\n", microtime(true) - $pt); $pt = microtime(true);
     set_progress($db, $run_id, 78, 'Pass 3: lonely-sale pass');
 
     foreach ($sales as $sale) {
@@ -587,11 +618,12 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         $s_ts = $sale['_ts'];
         if (!$s_ts) continue;
 
+        $bucket = isset($receipts_by_amt[(string)$s_amt]) ? $receipts_by_amt[(string)$s_amt] : null;
+        if ($bucket === null) continue;
+
         $cands = array();
-        foreach ($receipts as $receipt) {
+        foreach ($bucket as $receipt) {
             if (isset($claimed_receipts[$receipt['id']])) continue;
-            $r_amt = round($receipt['_amt'], 2);
-            if ($r_amt !== $s_amt) continue;
             $r_ts = $receipt['_ts'];
             if (!$r_ts) continue;
             $dt = $s_ts > $r_ts ? $s_ts - $r_ts : $r_ts - $s_ts;
@@ -610,7 +642,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 4 — BATCH: 1 receipt = sum of N unmatched sales ±2 days
     // ═══════════════════════════════════════════════════════════
-    fprintf(STDERR, "[timing] pass 3: %.2fs\n", microtime(true) - $pt); $pt = microtime(true);
     set_progress($db, $run_id, 83, 'Pass 4: batch settlement');
 
     $unmatched_receipts = array();
@@ -634,21 +665,24 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         $r_ts  = $receipt['_ts'];
         if (!$r_ts) continue;
         // Larger amounts often span bigger time windows (bulk weekly deposits)
-        $batch_days_secs = (($r_amt >= 10000) ? 7 : 2) * 86400;
-        $batch_tol = max(5.0, $r_amt * 0.005);
-        $s_amt_hi  = $r_amt + $batch_tol;
+        $batch_days = ($r_amt >= 10000) ? 7 : 2;
+        $batch_tol  = max(5.0, $r_amt * 0.005);
+        $s_amt_hi   = $r_amt + $batch_tol;
 
+        // Walk only the dates in the window instead of rescanning all sales —
+        // on 35K-sale datasets this cuts Pass 4 from ~70s to a few seconds
+        // (each date bucket averages ~500 sales vs 35,000 in the full array).
         $pool = array();
-        foreach ($sales as $sale) {
-            if (isset($claimed_sales[$sale['id']])) continue;
-            $s_amt = $sale['_amt'];
-            if ($s_amt <= 0 || $s_amt > $s_amt_hi) continue;
-            $s_ts = $sale['_ts'];
-            if (!$s_ts) continue;
-            $dt = $s_ts > $r_ts ? $s_ts - $r_ts : $r_ts - $s_ts;
-            if ($dt > $batch_days_secs) continue;
-            $pool[] = array('id'=>$sale['id'], 'amt'=>$s_amt, 'policy'=>$sale['policy_number'],
-                            'sale_obj'=>$sale);
+        for ($day = -$batch_days; $day <= $batch_days; $day++) {
+            $d = date('Y-m-d', $r_ts + $day * 86400);
+            if (!isset($by_date[$d])) continue;
+            foreach ($by_date[$d] as $sale) {
+                if (isset($claimed_sales[$sale['id']])) continue;
+                $s_amt = $sale['_amt'];
+                if ($s_amt <= 0 || $s_amt > $s_amt_hi) continue;
+                $pool[] = array('id'=>$sale['id'], 'amt'=>$s_amt, 'policy'=>$sale['policy_number'],
+                                'sale_obj'=>$sale);
+            }
         }
         if (count($pool) < 2) continue;
         usort($pool, function($a, $b) { return $b['amt'] <=> $a['amt']; });
@@ -679,7 +713,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 5 — SPLIT: 1 sale = sum of N unmatched receipts same day + channel
     // ═══════════════════════════════════════════════════════════
-    fprintf(STDERR, "[timing] pass 4: %.2fs\n", microtime(true) - $pt); $pt = microtime(true);
     set_progress($db, $run_id, 87, 'Pass 5: split payments');
 
     foreach ($sales as $sale) {
@@ -736,7 +769,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // Anything score >= 35 within ±10 days, amount ±5%, matches with 'low' confidence
     // CAPPED at 50 candidates per receipt to prevent runaway on large datasets.
     // ═══════════════════════════════════════════════════════════
-    fprintf(STDERR, "[timing] pass 5: %.2fs\n", microtime(true) - $pt); $pt = microtime(true);
     set_progress($db, $run_id, 91, 'Pass 6: fuzzy fallback');
     $FUZZY_MAX_CANDIDATES = 50;
 
@@ -751,28 +783,34 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         $fuzzy_tol = max(1.0, $r_amt * 0.05); // 5%
         $amt_lo = $r_amt - $fuzzy_tol;
         $amt_hi = $r_amt + $fuzzy_tol;
+        $bucket_lo = (int)$amt_lo;
+        $bucket_hi = (int)$amt_hi;
 
         $best_score = -1; $best_sale = null;
         $scored = 0;
-        foreach ($sales as $sale) {
+        $fuzzy_done = false;
+        for ($b = $bucket_lo; $b <= $bucket_hi && !$fuzzy_done; $b++) {
             if ($scored >= $FUZZY_MAX_CANDIDATES) break;
-            $s_amt = $sale['_amt'];
-            if ($s_amt < $amt_lo) continue;
-            if ($s_amt > $amt_hi) break;
-            if ($s_amt <= 0) continue;
-            if (isset($claimed_sales[$sale['id']])) continue;
-            $s_ts = $sale['_ts'];
-            if (!$s_ts) continue;
-            $dt = $s_ts > $r_ts ? $s_ts - $r_ts : $r_ts - $s_ts;
-            if ($dt > $fuzzy_secs) continue;
+            if (!isset($by_amt_bucket[$b])) continue;
+            foreach ($by_amt_bucket[$b] as $sale) {
+                if ($scored >= $FUZZY_MAX_CANDIDATES) { $fuzzy_done = true; break; }
+                $s_amt = $sale['_amt'];
+                if ($s_amt < $amt_lo || $s_amt > $amt_hi) continue;
+                if ($s_amt <= 0) continue;
+                if (isset($claimed_sales[$sale['id']])) continue;
+                $s_ts = $sale['_ts'];
+                if (!$s_ts) continue;
+                $dt = $s_ts > $r_ts ? $s_ts - $r_ts : $r_ts - $s_ts;
+                if ($dt > $fuzzy_secs) continue;
 
-            try {
-                list($score, $_) = score_pair($sale, $receipt, $agent_tokens_by_id);
-            } catch (Throwable $e) { continue; }
-            $scored++;
+                try {
+                    list($score, $_) = score_pair($sale, $receipt, $agent_tokens_by_id);
+                } catch (Throwable $e) { continue; }
+                $scored++;
 
-            if ($score > $best_score) { $best_score = $score; $best_sale = $sale; }
-            if ($best_score >= $MED_CONF_THRESHOLD) break; // good enough, stop
+                if ($score > $best_score) { $best_score = $score; $best_sale = $sale; }
+                if ($best_score >= $MED_CONF_THRESHOLD) { $fuzzy_done = true; break; }
+            }
         }
 
         if ($best_sale !== null && $best_score >= $FUZZY_THRESHOLD) {
@@ -790,8 +828,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
              . "(H:{$score_hist['high']} M:{$score_hist['medium']} L:{$score_hist['low']} "
              . "| P0:{$pass_counts['p0']} P1:{$pass_counts['p1']} P2:{$pass_counts['p2']} "
              . "P3:{$pass_counts['p3']} P4:{$pass_counts['p4']} P5:{$pass_counts['p5']} P6:{$pass_counts['p6']})";
-    fprintf(STDERR, "[timing] pass 6: %.2fs\n", microtime(true) - $pt);
-    fprintf(STDERR, "[timing] total smart_match_all: %.2fs\n", microtime(true) - $t_bench);
     set_progress($db, $run_id, 94, substr($summary, 0, 200));
 
     return array(
