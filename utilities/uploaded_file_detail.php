@@ -75,6 +75,9 @@ if ($upload['file_type'] === 'Sales') {
     </div>
     <div style="display:flex;gap:8px">
       <a href="uploaded_files_list.php" class="btn btn-ghost" style="font-weight:700"><i class="fa-solid fa-arrow-left"></i> BACK</a>
+      <?php if ($total_records > 0): ?>
+      <a href="../process/process_export_csv.php?type=upload&amp;upload_id=<?= $upload_id ?>" class="btn btn-ghost" style="font-weight:700"><i class="fa-solid fa-download"></i> DOWNLOAD CSV</a>
+      <?php endif; ?>
       <?php if ($can_flag && $upload['flag_status'] !== 'flagged'): ?>
       <a href="#" onclick="openFlagModal(); return false;" class="btn btn-ghost" style="font-weight:700;color:#8a5a00"><i class="fa-solid fa-flag"></i> SEND BACK TO UPLOADER</a>
       <?php endif; ?>
@@ -205,7 +208,7 @@ if ($upload['file_type'] === 'Sales') {
   </div>
   <?php if ($total_records > 100): ?>
   <div style="padding:12px;background:#f9f9f9;border-top:1px solid #e0e0e0;font-size:12px;color:#666">
-    Showing 100 of <?= number_format($total_records) ?> records. <a href="#" onclick="alert('Download full dataset from reconciliation module'); return false;">Download full dataset</a>
+    Showing 100 of <?= number_format($total_records) ?> records. <a href="../process/process_export_csv.php?type=upload&amp;upload_id=<?= $upload_id ?>">Download full dataset</a>
   </div>
   <?php endif; ?>
 </div>
