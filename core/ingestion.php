@@ -79,25 +79,29 @@ if (!function_exists('pick')) {
         foreach ($aliases as $a) {
             if (isset($row[$a]) && trim($row[$a]) !== '') return $row[$a];
         }
-        // If nothing matched exactly, try fuzzy: normalize both sides
-        // to just letters+numbers and check for substring matches.
-        // Only do this for aliases 4+ chars to avoid "id" matching "debit_id"
-        // ("id","ref","ccy") can't grab unrelated columns.
+        // Build normalized key map once — used for both case-insensitive exact
+        // match and substring fuzzy match below. Skips empty values.
         $norm_keys = array();
         foreach ($row as $k => $v) {
-            if (trim($v) === '') continue;
-            $nk = preg_replace('/[^a-z0-9]+/', '', strtolower($k));
+            if (trim((string)$v) === '') continue;
+            $nk = preg_replace('/[^a-z0-9]+/', '', strtolower((string)$k));
             if ($nk !== '') $norm_keys[$nk] = $k;
         }
+        // Case-insensitive EXACT match for short aliases (covers "VRN", "ID",
+        // "REF", etc. where columns are uppercase in the source file).
         foreach ($aliases as $a) {
-            $na = preg_replace('/[^a-z0-9]+/', '', strtolower($a));
-            if (strlen($na) < 4) continue;
-            // exact normalized match first (handles "10%_commission" -> "10commission")
-            if (isset($norm_keys[$na]) && trim($row[$norm_keys[$na]]) !== '') {
+            $na = preg_replace('/[^a-z0-9]+/', '', strtolower((string)$a));
+            if ($na === '') continue;
+            if (isset($norm_keys[$na]) && trim((string)$row[$norm_keys[$na]]) !== '') {
                 return $row[$norm_keys[$na]];
             }
+        }
+        // Fuzzy substring: only for aliases 4+ chars (else "id" would match "debit_id")
+        foreach ($aliases as $a) {
+            $na = preg_replace('/[^a-z0-9]+/', '', strtolower((string)$a));
+            if (strlen($na) < 4) continue;
             foreach ($norm_keys as $nk => $orig) {
-                if (strpos($nk, $na) !== false && trim($row[$orig]) !== '') {
+                if (strpos($nk, $na) !== false && trim((string)$row[$orig]) !== '') {
                     return $row[$orig];
                 }
             }
@@ -857,9 +861,33 @@ if (!function_exists('insert_sales_rows')) {
                 $currency  = strtoupper(pick($row, $aliases['currency']));
 
                 // Try to pick reference_no and terminal_id if columns exist
-                $ref_no  = pick($row, array('reference_no','external_ref','ecocash_ref','receipt_ref','txn_ref','transaction_reference'));
+                $ref_no  = pick($row, array('reference_no','payment_reference','external_ref','ecocash_ref','receipt_ref','txn_ref','transaction_reference','rrn'));
                 $term_id = pick($row, array('terminal_id','terminal','pos_terminal','tid','terminal_no','pos_id'));
                 $code_val = pick($row, array('code','txn_code','transaction_code'));
+
+                // ── CAPTURE EVERY POSSIBLE IDENTIFIER into reference_no ──
+                // The matcher does substring search across reference_no when scoring,
+                // so packing multiple identifiers here multiplies our chance of a match
+                // against arbitrary bank narrations. We try a wide net of column name
+                // variants because every sales export file is different.
+                $vrn          = pick($row, array('vrn','vehicle_reg','vehicle_registration','reg_no','registration','plate','plate_no','number_plate','vehicle_no'));
+                $cust_phone   = pick($row, array('customer_phone','phone','msisdn','mobile','cell','contact','phone_number','customer_phone_number'));
+                $cust_id      = pick($row, array('customer_id','cust_id','client_id','account','account_no','customer_number'));
+                $sale_id_ext  = pick($row, array('id','sale_id','doc_no','document_no','trans_id','transaction_id','invoice_no','receipt_number'));
+                $location_val = pick($row, array('location','branch','office','station','site'));
+                $owner_name   = pick($row, array('owner_name','customer_name','client_name','insured_name'));
+
+                // Build a compact identifier blob — VRN first (most likely to match
+                // bank narratives), then phone, sale id, customer id, location.
+                $id_parts = array();
+                foreach (array($ref_no, $vrn, $sale_id_ext, $cust_phone, $cust_id, $location_val, $owner_name) as $val) {
+                    $v = trim((string)$val);
+                    if ($v !== '' && $v !== '0') $id_parts[] = $v;
+                }
+                if (!empty($id_parts)) {
+                    $combined = substr(implode(' ', $id_parts), 0, 95);
+                    $ref_no = $combined;
+                }
 
                 if (empty($ref_no))  $ref_no  = null;
                 if (empty($term_id)) $term_id = null;
@@ -958,9 +986,13 @@ if (!function_exists('insert_receipts_rows')) {
                 continue;
             }
 
-            // Extract terminal ID from description text (CBZ: "TID:40091364")
-            if (empty($terminal) && !empty($ref)) {
-                if (preg_match('/TID[:\s]*(\d{6,})/', $ref, $tid_m)) {
+            // Extract terminal ID from narration text. Banks put it in
+            // different places: CBZ puts "TID:40091364" in the description
+            // column (which we store as source_name); others stamp it in
+            // the reference. Search both so we populate terminal_id either way.
+            if (empty($terminal)) {
+                $haystack = (string)$ref . ' ' . (string)$src;
+                if (preg_match('/TID[:\s]*(\d{6,})/i', $haystack, $tid_m)) {
                     $terminal = $tid_m[1];
                 }
             }
@@ -1013,6 +1045,29 @@ if (!function_exists('insert_receipts_rows')) {
             } else {
                 $match_status  = 'pending';
                 $exclude_reason = null;
+
+                // Exclude non-customer receipts so they don't inflate the
+                // unmatched queue. RTGS/RTTF/OMNI are intercompany transfers,
+                // not customer payments; funds-sweeps and tax/admin entries
+                // are bank internals. They should never try to match a sale.
+                $narr = strtoupper((string)$ref . ' ' . (string)$src);
+                if (strpos($narr, 'RTGS') !== false
+                    || strpos($narr, 'RTTF') !== false
+                    || strpos($narr, 'RTTI') !== false
+                    || strpos($narr, 'OMNI') !== false
+                    || strpos($narr, 'FUNDS SWEEP') !== false
+                    || strpos($narr, 'TAX FREE') !== false
+                    || strpos($narr, 'MAINTENANCE FEE') !== false
+                    || strpos($narr, 'INTER-ACCOUNT TRANSFER') !== false
+                    || strpos($narr, 'ESB_INTERNAL') !== false) {
+                    $match_status  = 'excluded';
+                    $exclude_reason = 'non_customer_transfer';
+                }
+                // Filter test/placeholder data (amount ≤ 1 with 'test' source)
+                elseif ($amount_val <= 1.0 && strpos(strtolower((string)$src), 'test') !== false) {
+                    $match_status  = 'excluded';
+                    $exclude_reason = 'test_placeholder';
+                }
             }
 
             if (!in_array($currency, array('ZWG', 'USD'))) $currency = 'ZWG';

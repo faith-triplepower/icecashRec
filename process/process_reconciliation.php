@@ -15,10 +15,17 @@
 //   manual_match   — manually link/unlink a receipt to a sale (JSON)
 // ============================================================
 
+// Reconciling thousands of sales vs hundreds of receipts involves heavy
+// in-memory scoring — raise limits for this endpoint only.
+@ini_set('memory_limit', '1024M');
+@ini_set('max_execution_time', 600);
+@set_time_limit(600);
+
 require_once '../core/auth.php';
 require_once '../core/db.php';
 require_once '../core/notifications.php';
 require_once '../core/ingestion.php';
+require_once '../core/matcher.php';
 require_role(['Manager','Reconciler','Admin']); // Uploaders cannot reconcile
 csrf_verify();
 
@@ -221,6 +228,7 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
                          matched_sale_id=NULL, match_confidence=NULL
                   WHERE txn_date BETWEEN ? AND ?
                     AND direction='credit'
+                    AND match_status <> 'excluded'
                     AND (match_confidence IS NULL OR match_confidence <> 'manual')"
                . $receipts_in_clause;
     $reset = $db->prepare($reset_sql);
@@ -424,12 +432,12 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
         if (isset($matched_sale_ids[$sale['id']])) continue;
         if ($sale['amount'] <= 0) continue;
         $sale_amt = (float)$sale['amount'];
-        $tol = max(0.50, $sale_amt * 0.005); // 0.5% or 50 cents, whichever is larger
+        $tol = max(2, $sale_amt * 2); // 0.5% or 50 cents, whichever is larger
 
         $dates = array(
             $sale['txn_date'],
-            date('Y-m-d', strtotime($sale['txn_date'] . ' -1 day')),
-            date('Y-m-d', strtotime($sale['txn_date'] . ' +1 day')),
+            date('Y-m-d', strtotime($sale['txn_date'] . ' -3 day')),
+            date('Y-m-d', strtotime($sale['txn_date'] . ' +3 day')),
         );
         $best_rid = null; $best_diff = PHP_INT_MAX;
         foreach ($dates as $d) {
@@ -895,7 +903,13 @@ try {
 
     $db->begin_transaction();
 
-    $result = run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agent_filter, $opts, $sales_upload_ids, $receipts_upload_ids);
+    // Choose matcher engine — 'smart' (default) uses core/matcher.php (scoring-based);
+    // set matcher_engine='legacy' in system_settings to fall back to the original 5-tier engine.
+    $engine_row = $db->query("SELECT setting_value FROM system_settings WHERE setting_key='matcher_engine'")->fetch_assoc();
+    $engine_fn  = ($engine_row && $engine_row['setting_value'] === 'legacy')
+                    ? 'run_matching_engine'
+                    : 'smart_match_all';
+    $result = $engine_fn($db, $run_id, $date_from, $date_to, $product, $agent_filter, $opts, $sales_upload_ids, $receipts_upload_ids);
     $variance = calculate_variances($db, $run_id, $date_from, $date_to, $agent_filter);
     $unmatched = count_unmatched($db, $date_from, $date_to);
 
@@ -931,7 +945,32 @@ try {
 
     set_progress($db, $run_id, 95, 'Finalizing');
 
-    $match_rate = $result['total_sales'] > 0 ? round(($result['matched_count'] / $result['total_sales']) * 100, 2) : 0;
+    // Match rate is expressed RECEIPT-side, not sale-side. One receipt
+    // typically represents one customer payment; one sale represents one
+    // policy issue. On aggregated bank deposits or Zinara-fee days many
+    // sales map to one receipt, so matched/total_sales always looks
+    // artificially low (~4%) even when every receipt is accounted for.
+    //
+    // Denominator: credits in the period that weren't auto-excluded as
+    // RTGS/OMNI/test data. Numerator: credits that actually reached
+    // 'matched' (or 'variance' for FX-flagged matches) — queried live
+    // rather than taken from $result['matched_count'], which Pass 4 /
+    // Pass 5 inflate by counting sales per batch.
+    $rates_row = $db->query(
+        "SELECT
+            SUM(match_status IN ('matched','variance')) m,
+            SUM(match_status <> 'excluded') active,
+            SUM(match_status = 'pending') pending
+         FROM receipts
+         WHERE txn_date BETWEEN '$date_from' AND '$date_to'
+           AND direction='credit'"
+    )->fetch_assoc();
+    $matched_receipts = (int)($rates_row['m'] ?? 0);
+    $active_receipts  = (int)($rates_row['active'] ?? 0);
+    $pending_receipts = (int)($rates_row['pending'] ?? 0);
+    $match_rate = $active_receipts > 0
+        ? round(($matched_receipts / $active_receipts) * 100, 2)
+        : 0;
 
     $upd = $db->prepare("
         UPDATE reconciliation_runs
@@ -955,8 +994,11 @@ try {
     $db->commit();
 
     $exec_time = round(microtime(true) - $start_time, 2);
-    $summary = "{$result['matched_count']}/{$result['total_sales']} matched ($match_rate%), "
-             . "{$result['fx_flagged']} FX flags, {$unmatched['receipts']} unmatched receipts";
+    // User-facing summary: receipt-side match rate (the meaningful number)
+    // instead of matched/total_sales (which is misleading by design).
+    $fx_bit = $result['fx_flagged'] > 0 ? ", {$result['fx_flagged']} FX flagged" : '';
+    $summary = "{$matched_receipts} of {$active_receipts} receipts matched ({$match_rate}%)"
+             . ", {$pending_receipts} pending" . $fx_bit;
     audit_log_entry($uid, 'RECON_RUN', "Run #$run_id complete: $summary in {$exec_time}s");
 
     $msg = "Reconciliation complete. $summary.";

@@ -52,8 +52,9 @@ if (!isset($_GET['date_from']) && !isset($_GET['date_to'])) {
 $f_source    = $_GET['source']       ?? '';
 $f_status    = $_GET['match_status'] ?? '';
 $f_direction = $_GET['direction']    ?? 'credit';   // credit | debit | all
-$page        = max(1,(int)($_GET['page'] ?? 1));
-$offset      = ($page-1)*20;
+$page        = max(1, (int)($_GET['page'] ?? 1));
+$per_page    = 10;
+$offset      = ($page - 1) * $per_page;
 
 $where = ["txn_date BETWEEN '" . $db->real_escape_string($f_from) . "' AND '" . $db->real_escape_string($f_to) . "'"];
 if ($f_direction === 'credit' || $f_direction === 'debit') {
@@ -80,8 +81,9 @@ $kpi = $db->query("SELECT
 
 $match_rate = $kpi['total'] > 0 ? round(($kpi['matched']/$kpi['total'])*100,1) : 0;
 
-$rows  = $db->query("SELECT * FROM receipts WHERE $w ORDER BY txn_date DESC LIMIT 10 OFFSET $offset")->fetch_all(MYSQLI_ASSOC);
+$rows  = $db->query("SELECT * FROM receipts WHERE $w ORDER BY txn_date DESC LIMIT $per_page OFFSET $offset")->fetch_all(MYSQLI_ASSOC);
 $total = $db->query("SELECT COUNT(*) AS c FROM receipts WHERE $w")->fetch_assoc()['c'];
+$total_pages = max(1, (int)ceil($total / $per_page));
 ?>
 
 <div class="page-header">
@@ -193,11 +195,16 @@ $total = $db->query("SELECT COUNT(*) AS c FROM receipts WHERE $w")->fetch_assoc(
       <tr><td colspan="8" class="dim" style="text-align:center;padding:20px">No receipt records found. Upload receipt files first.</td></tr>
       <?php else: ?>
       <tr><td colspan="8" class="dim" style="text-align:center;padding:14px;font-size:11px">
+        <?php $base_qs = $_GET; ?>
         Showing <?= count($rows) ?> of <?= number_format($total) ?> records
-        <?php if ($total > 20): ?>
-        &nbsp;·&nbsp;
-        <?php if ($page>1): ?><a href="?page=<?=$page-1?>&date_from=<?=$f_from?>&date_to=<?=$f_to?>">← Prev</a> &nbsp;<?php endif; ?>
-        <a href="?page=<?=$page+1?>&date_from=<?=$f_from?>&date_to=<?=$f_to?>">Next →</a>
+        <?php if ($total_pages > 1): ?>
+        &nbsp;·&nbsp; Page <?= $page ?> of <?= $total_pages ?>
+        <?php if ($page > 1): ?>
+          &nbsp;·&nbsp; <a href="?<?= http_build_query(array_merge($base_qs, array('page'=>$page-1))) ?>">← Prev</a>
+        <?php endif; ?>
+        <?php if ($page < $total_pages): ?>
+          &nbsp; <a href="?<?= http_build_query(array_merge($base_qs, array('page'=>$page+1))) ?>">Next →</a>
+        <?php endif; ?>
         <?php endif; ?>
       </td></tr>
       <?php endif; ?>

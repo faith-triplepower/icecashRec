@@ -53,8 +53,16 @@ $receipts_sources       = load_distinct($db, 'source_name', 'Receipts');
   </div>
 </div>
 
-<?php if ($success): ?><div class="alert alert-success">✓ <?= $success ?></div><?php endif; ?>
-<?php if ($error):   ?><div class="alert alert-danger">⚠ <?= $error ?></div><?php endif; ?>
+<?php
+// `white-space:pre-line` lets the headline + per-file detail land on
+// separate lines inside the alert. The flash message puts \n between them;
+// htmlspecialchars preserves that without needing to inject HTML.
+// `align-items:flex-start` stops the icon from vertically centring on a
+// multi-line message.
+$alert_style = 'white-space:pre-line;align-items:flex-start';
+?>
+<?php if ($success): ?><div class="alert alert-success" style="<?= $alert_style ?>">✓ <?= $success ?></div><?php endif; ?>
+<?php if ($error):   ?><div class="alert alert-danger"  style="<?= $alert_style ?>">⚠ <?= $error ?></div><?php endif; ?>
 
 <div class="two-col">
   <!-- Sales Upload -->

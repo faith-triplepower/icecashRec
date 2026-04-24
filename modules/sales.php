@@ -73,12 +73,13 @@ $kpi = $db->query("SELECT
     COUNT(*) AS total
   FROM sales s WHERE $w")->fetch_assoc();
 
-// Detail records (paginated - show 20)
-$page   = max(1,(int)($_GET['page'] ?? 1));
-$offset = ($page-1)*10;
-$rows   = $db->query("SELECT s.*, a.agent_name FROM sales s
+// Detail records (paginated — 10 per page)
+$page     = max(1, (int)($_GET['page'] ?? 1));
+$per_page = 10;
+$offset   = ($page - 1) * $per_page;
+$rows     = $db->query("SELECT s.*, a.agent_name FROM sales s
   JOIN agents a ON s.agent_id=a.id WHERE $w
-  ORDER BY s.txn_date DESC, s.id DESC LIMIT 10 OFFSET $offset")->fetch_all(MYSQLI_ASSOC);
+  ORDER BY s.txn_date DESC, s.id DESC LIMIT $per_page OFFSET $offset")->fetch_all(MYSQLI_ASSOC);
 
 // By Agent
 $by_agent = $db->query("SELECT a.agent_name,
@@ -198,11 +199,21 @@ $total_rows  = $db->query("SELECT COUNT(*) AS c FROM sales s WHERE $w")->fetch_a
         <tr><td colspan="9" class="dim" style="text-align:center;padding:20px">No sales records found for this period. Upload a sales file first.</td></tr>
         <?php else: ?>
         <tr><td colspan="9" class="dim" style="text-align:center;padding:14px;font-size:11px">
+          <?php
+            // Preserve every current GET filter on Prev/Next links so paginating
+            // doesn't silently drop the user's product/agent/currency picks.
+            $total_pages = (int)ceil($total_rows / $per_page);
+            $base_qs = $_GET;
+          ?>
           Showing <?= count($rows) ?> of <?= number_format($total_rows) ?> records
-          <?php if ($total_rows > 20): ?>
-          &nbsp;·&nbsp;
-          <?php if ($page > 1): ?><a href="?page=<?= $page-1 ?>&date_from=<?= $f_from ?>&date_to=<?= $f_to ?>">← Prev</a> &nbsp;<?php endif; ?>
-          <a href="?page=<?= $page+1 ?>&date_from=<?= $f_from ?>&date_to=<?= $f_to ?>">Next →</a>
+          <?php if ($total_pages > 1): ?>
+          &nbsp;·&nbsp; Page <?= $page ?> of <?= $total_pages ?>
+          <?php if ($page > 1): ?>
+            &nbsp;·&nbsp; <a href="?<?= http_build_query(array_merge($base_qs, array('page'=>$page-1))) ?>">← Prev</a>
+          <?php endif; ?>
+          <?php if ($page < $total_pages): ?>
+            &nbsp; <a href="?<?= http_build_query(array_merge($base_qs, array('page'=>$page+1))) ?>">Next →</a>
+          <?php endif; ?>
           <?php endif; ?>
         </td></tr>
         <?php endif; ?>

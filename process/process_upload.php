@@ -8,6 +8,12 @@
 // Part of IceCashRec — Zimnat General Insurance
 // ============================================================
 
+// Large sales/receipts files can exceed PHP defaults — raise limits
+// for this endpoint only (doesn't affect other apps on the server).
+@ini_set('memory_limit', '1024M');
+@ini_set('max_execution_time', 600);
+@set_time_limit(600);
+
 // Pull in authentication, email helpers, and the file parsing engine
 require_once '../core/auth.php';
 require_once '../core/notifications.php';
@@ -90,9 +96,11 @@ foreach ($files as $file) {
 
     $results[$summary['status']]++;
     $results['total_records'] += $summary['record_count'];
-    $results['messages'][]     = "'$orig_name' — " . $summary['validation'];
+    $display = isset($summary['display']) ? $summary['display'] : $summary['validation'];
+    $results['messages'][]     = $orig_name . ' (' . $display . ')';
 
-    // Per-file audit entry
+    // Per-file audit entry — keep the verbose `validation` string here
+    // so operators still get the full error detail in the audit log.
     audit_log($uid, 'FILE_UPLOAD',
         "Uploaded: $orig_name ($file_type / $report_type) — " . $summary['validation']);
 
@@ -110,19 +118,36 @@ foreach ($files as $file) {
 }
 
 // ── Build aggregate message + redirect ──────────────────────
-$total_files = count($files);
-$headline = $total_files . ' file' . ($total_files > 1 ? 's' : '') . ' processed: '
-          . $results['ok'] . ' ok, ' . $results['warning'] . ' warning, '
-          . $results['failed'] . ' failed, ' . $results['rejected'] . ' rejected. '
-          . number_format($results['total_records']) . ' records imported.';
+// Headline: drop zero counters (no point saying "0 failed, 0 rejected" when
+// everything worked). When every file is OK, collapse to a clean sentence.
+$total_files   = count($files);
+$total_records = (int)$results['total_records'];
+$files_word    = 'file' . ($total_files === 1 ? '' : 's');
 
-// Include first few per-file messages for context
-$detail = implode(' | ', array_slice($results['messages'], 0, 3));
-if (count($results['messages']) > 3) $detail .= ' | +' . (count($results['messages']) - 3) . ' more';
+$has_issues = ($results['warning'] + $results['failed'] + $results['rejected']) > 0;
+if ($has_issues) {
+    $bits = array();
+    if ($results['ok'])       $bits[] = $results['ok']       . ' ok';
+    if ($results['warning'])  $bits[] = $results['warning']  . ' warning';
+    if ($results['failed'])   $bits[] = $results['failed']   . ' failed';
+    if ($results['rejected']) $bits[] = $results['rejected'] . ' rejected';
+    $headline = "$total_files $files_word processed — " . implode(', ', $bits)
+              . '. ' . number_format($total_records) . ' records imported.';
+} else {
+    $headline = "$total_files $files_word uploaded — "
+              . number_format($total_records) . ' records imported.';
+}
 
-$flash_type = ($results['failed'] + $results['rejected'] > 0) ? 'error'
-            : ($results['warning'] > 0 ? 'success' : 'success');
-redirect_back($flash_type, $headline . ' ' . $detail);
+// Per-file details: bullet-separated on a second line (the alert div uses
+// `white-space:pre-line` so \n renders as a line break, keeping headline +
+// detail visually distinct without introducing HTML into the flash message).
+$detail = implode('  •  ', array_slice($results['messages'], 0, 3));
+if (count($results['messages']) > 3) {
+    $detail .= '  •  +' . (count($results['messages']) - 3) . ' more';
+}
+
+$flash_type = ($results['failed'] + $results['rejected'] > 0) ? 'error' : 'success';
+redirect_back($flash_type, $headline . "\n" . $detail);
 
 // ════════════════════════════════════════════════════════════
 // Process a single uploaded file. Isolated so it can be called
@@ -248,6 +273,15 @@ function process_one_upload($db, $file, $file_type, $report_type, $source_name, 
         }
         $status = empty($errors) ? 'ok' : 'warning';
         if ($record_count === 0 && !empty($errors)) $status = 'failed';
+
+        // Shorter display string for the flash message: thousands-separated
+        // record count, optional notes in parens. Keeps the verbose
+        // `validation` intact for the DB audit trail.
+        $display_bits = array(number_format($record_count));
+        if ($duplicates > 0)       $display_bits[] = $duplicates . ' dup';
+        if (!empty($errors))       $display_bits[] = count($errors) . ' errors';
+        if (!empty($notes))        $display_bits[] = implode(', ', $notes);
+        $display = implode('; ', $display_bits);
     } catch (Exception $e) {
         $db->rollback();
         $status       = 'failed';
@@ -349,6 +383,7 @@ function process_one_upload($db, $file, $file_type, $report_type, $source_name, 
         'status'       => $status,
         'record_count' => $record_count,
         'validation'   => $validation,
+        'display'      => isset($display) ? $display : $validation,
     );
 }
 

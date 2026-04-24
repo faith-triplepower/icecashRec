@@ -134,11 +134,11 @@ if ($upload['file_type'] === 'Sales') {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Period From</label>
-        <input type="text" class="form-input" value="<?= htmlspecialchars($upload['period_from']) ?>" readonly>
+        <input type="text" class="form-input" value="<?= htmlspecialchars($upload['period_from'] ?? '') ?>" readonly>
       </div>
       <div class="form-group">
         <label class="form-label">Period To</label>
-        <input type="text" class="form-input" value="<?= htmlspecialchars($upload['period_to']) ?>" readonly>
+        <input type="text" class="form-input" value="<?= htmlspecialchars($upload['period_to'] ?? '') ?>" readonly>
       </div>
       <div class="form-group">
         <label class="form-label">Records Imported</label>
