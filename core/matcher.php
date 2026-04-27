@@ -13,7 +13,7 @@
 //   Pass 2 — LONELY RECEIPT: only one exact-amount sale in ±14 days.
 //   Pass 3 — LONELY SALE:    only one exact-amount receipt in ±14 days.
 //   Pass 4 — BATCH:  1 receipt = Σ sales within ±2 days.
-//   Pass 5 — SPLIT:  1 sale = Σ receipts same day + channel.
+//   Pass 5 — SPLIT:  1 sale = Σ of up to 10 receipts, same channel, ±30 days.
 //   Pass 6 — FUZZY FALLBACK: widened window, lower threshold.
 //
 // Manual matches are never touched. Duplicates in sales/receipts
@@ -65,6 +65,25 @@ function match_noise_words() {
         'HARARE','HRE','BRANCH','OFFICE','LTD','PVT','LIMITED','PRIVATE',
         'BANK','COMPANY','CO','THE','AND','AT','FROM','TO',
     );
+}
+
+// Recursive subset-sum search for split-payment matching.
+// Returns the first subset of $pool (size 2..$max_parts) whose 'amt' values
+// sum to $target within 0.01, or null. Pool must be sorted ascending by 'amt'
+// so the >target prune fires early. Pool entries: array('id','amt',...).
+function match_find_split_subset($pool, $target, $max_parts, $start = 0, $current = array(), $sum = 0.0) {
+    $depth = count($current);
+    if ($depth >= 2 && abs($sum - $target) < 0.01) return $current;
+    if ($depth >= $max_parts) return null;
+    if ($sum - $target > 0.01) return null; // amounts are positive — overshoot can't recover
+    $n = count($pool);
+    for ($i = $start; $i < $n; $i++) {
+        $next = $current;
+        $next[] = $pool[$i];
+        $found = match_find_split_subset($pool, $target, $max_parts, $i + 1, $next, $sum + $pool[$i]['amt']);
+        if ($found) return $found;
+    }
+    return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -711,43 +730,49 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     }
 
     // ═══════════════════════════════════════════════════════════
-    // PASS 5 — SPLIT: 1 sale = sum of N unmatched receipts same day + channel
+    // PASS 5 — SPLIT: 1 sale = sum of up to 10 unmatched receipts,
+    // same channel, within a ±30-day window. A $20k sale must always
+    // resolve to $20k of receipts; if the customer paid in instalments
+    // we still find them as long as they land inside the month window.
     // ═══════════════════════════════════════════════════════════
     set_progress($db, $run_id, 87, 'Pass 5: split payments');
+
+    $SPLIT_WINDOW_DAYS = 30;
+    $SPLIT_WINDOW_SECS = $SPLIT_WINDOW_DAYS * 86400;
+    $SPLIT_MAX_PARTS   = 10;
+    $SPLIT_POOL_CAP    = 20;
 
     foreach ($sales as $sale) {
         if (isset($claimed_sales[$sale['id']])) continue;
         $s_amt = (float)($sale['amount'] ?? 0);
         if ($s_amt <= 0) continue;
         $nch   = $sale['_chan_norm'];
-        $sdate = (string)($sale['txn_date'] ?? '');
-        if ($sdate === '') continue;
+        $s_ts  = (int)($sale['_ts'] ?? 0);
+        if (!$s_ts) continue;
 
         $pool = array();
         foreach ($receipts as $r) {
             if (isset($claimed_receipts[$r['id']])) continue;
-            if ((string)($r['txn_date'] ?? '') !== $sdate) continue;
             if ($r['_chan_norm'] !== $nch) continue;
-            $pool[] = array('id'=>$r['id'], 'amt'=>$r['_amt'], 'receipt_obj'=>$r);
-            if (count($pool) >= 8) break;
+            $r_amt = (float)$r['_amt'];
+            if ($r_amt <= 0 || $r_amt > $s_amt + 0.01) continue; // single receipt can't exceed sale
+            $r_ts = (int)($r['_ts'] ?? 0);
+            if (!$r_ts) continue;
+            $dt = $r_ts > $s_ts ? $r_ts - $s_ts : $s_ts - $r_ts;
+            if ($dt > $SPLIT_WINDOW_SECS) continue;
+            $pool[] = array('id'=>$r['id'], 'amt'=>$r_amt, 'receipt_obj'=>$r);
+            if (count($pool) >= $SPLIT_POOL_CAP) break;
         }
         if (count($pool) < 2) continue;
 
-        $found = null; $n = count($pool);
-        for ($i = 0; $i < $n && !$found; $i++) {
-            for ($j = $i + 1; $j < $n && !$found; $j++) {
-                if (abs($pool[$i]['amt'] + $pool[$j]['amt'] - $s_amt) < 0.01) {
-                    $found = array($pool[$i], $pool[$j]);
-                    break;
-                }
-                for ($k = $j + 1; $k < $n && !$found; $k++) {
-                    if (abs($pool[$i]['amt'] + $pool[$j]['amt'] + $pool[$k]['amt'] - $s_amt) < 0.01) {
-                        $found = array($pool[$i], $pool[$j], $pool[$k]);
-                        break;
-                    }
-                }
-            }
-        }
+        // Sort ascending by amount so the overshoot prune in the recursive
+        // search fires as early as possible.
+        usort($pool, function($a, $b) {
+            if ($a['amt'] == $b['amt']) return 0;
+            return ($a['amt'] < $b['amt']) ? -1 : 1;
+        });
+
+        $found = match_find_split_subset($pool, $s_amt, $SPLIT_MAX_PARTS);
         if ($found) {
             try {
                 foreach ($found as $r) {
