@@ -763,22 +763,38 @@ function calculate_variances($db, $run_id, $date_from, $date_to, $agent_filter) 
 // bucketed by how old they are. Written onto reconciliation_runs.
 // ════════════════════════════════════════════════════════════
 function count_unmatched($db, $date_from, $date_to) {
-    // "Unmatched sale" now means anything not fully covered — that is,
+    // "Unmatched sale" should mean anything not fully covered — that is,
     // paid_status of unpaid OR partial. Currency_review sits in its own
     // dedicated tab, so don't double-count it here.
-    $unm_sales = $db->query("
+    //
+    // Defensive: when the add_split_payments.sql migration hasn't run
+    // yet, sales.paid_status doesn't exist and the query fails. Detect
+    // that and fall back to the pre-migration definition (no receipts
+    // attached at all). The recon completes; the unmatched count is
+    // approximate until the migration runs.
+    $sales_q = $db->query("
         SELECT COUNT(*) c FROM sales s
         WHERE s.txn_date BETWEEN '$date_from' AND '$date_to'
           AND s.paid_status IN ('unpaid','partial')
-    ")->fetch_assoc()['c'];
+    ");
+    if (!$sales_q) {
+        $sales_q = $db->query("
+            SELECT COUNT(*) c FROM sales s
+            LEFT JOIN receipts r ON r.matched_sale_id = s.id
+            WHERE s.txn_date BETWEEN '$date_from' AND '$date_to'
+              AND r.id IS NULL
+        ");
+    }
+    $unm_sales = $sales_q ? (int)$sales_q->fetch_assoc()['c'] : 0;
 
-    $unm_rec = $db->query("
+    $rec_q = $db->query("
         SELECT COUNT(*) c FROM receipts
         WHERE txn_date BETWEEN '$date_from' AND '$date_to'
           AND match_status='pending'
-    ")->fetch_assoc()['c'];
+    ");
+    $unm_rec = $rec_q ? (int)$rec_q->fetch_assoc()['c'] : 0;
 
-    return array('sales' => (int)$unm_sales, 'receipts' => (int)$unm_rec);
+    return array('sales' => $unm_sales, 'receipts' => $unm_rec);
 }
 
 // ════════════════════════════════════════════════════════════
