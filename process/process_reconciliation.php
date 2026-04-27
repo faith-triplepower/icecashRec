@@ -26,6 +26,7 @@ require_once '../core/db.php';
 require_once '../core/notifications.php';
 require_once '../core/ingestion.php';
 require_once '../core/matcher.php';
+require_once '../core/allocation.php';
 require_role(['Manager','Reconciler','Admin']); // Uploaders cannot reconcile
 csrf_verify();
 
@@ -157,6 +158,7 @@ function data_quality_report($db, $date_from, $date_to, $agent_filter) {
 function manual_match($db, $uid, $receipt_id, $sale_id, $action, $reason, $run_id) {
     $receipt_id = (int)$receipt_id;
     $sale_id    = (int)$sale_id;
+    $prev_sale_id = null;
 
     if ($action === 'match') {
         $stmt = $db->prepare("SELECT policy_number, amount, currency FROM sales WHERE id=?");
@@ -166,15 +168,50 @@ function manual_match($db, $uid, $receipt_id, $sale_id, $action, $reason, $run_i
         $stmt->close();
         if (!$sale) throw new Exception("Sale $sale_id not found");
 
+        // Enforce the 10-receipt cap. Re-matching a receipt already
+        // attached to this same sale is a no-op, so don't count it.
+        $cur = $db->prepare("SELECT matched_sale_id FROM receipts WHERE id=?");
+        $cur->bind_param('i', $receipt_id);
+        $cur->execute();
+        $cur_row = $cur->get_result()->fetch_assoc();
+        $cur->close();
+        $prev_sale_id = $cur_row && $cur_row['matched_sale_id'] ? (int)$cur_row['matched_sale_id'] : null;
+        if ($prev_sale_id !== $sale_id) {
+            $attached = receipts_attached_to_sale($db, $sale_id);
+            if ($attached >= SPLIT_MAX_RECEIPTS_PER_SALE) {
+                throw new Exception("Sale already has the maximum of " . SPLIT_MAX_RECEIPTS_PER_SALE . " receipts allocated. Unmatch one first.");
+            }
+        }
+
+        // Receipt currency vs sale currency dictates the new status.
+        // Single-receipt and same-currency multi-receipt allocations get
+        // 'matched'; mixed-currency lands in 'currency_review' and
+        // refresh_paid_status() will roll the sale up to currency_review too.
+        $rec = $db->prepare("SELECT currency FROM receipts WHERE id=?");
+        $rec->bind_param('i', $receipt_id);
+        $rec->execute();
+        $rec_row = $rec->get_result()->fetch_assoc();
+        $rec->close();
+        $new_status = ($rec_row && $rec_row['currency'] !== $sale['currency'])
+                        ? 'currency_review' : 'matched';
+
         $upd = $db->prepare(
             "UPDATE receipts
-             SET matched_policy=?, matched_sale_id=?, match_status='matched', match_confidence='manual'
+             SET matched_policy=?, matched_sale_id=?, match_status=?, match_confidence='manual'
              WHERE id=?"
         );
-        $upd->bind_param('sii', $sale['policy_number'], $sale_id, $receipt_id);
+        $upd->bind_param('sisi', $sale['policy_number'], $sale_id, $new_status, $receipt_id);
         $upd->execute();
         $upd->close();
     } elseif ($action === 'unmatch') {
+        // Capture the prior sale id so we can refresh its paid_status after the unlink.
+        $cur = $db->prepare("SELECT matched_sale_id FROM receipts WHERE id=?");
+        $cur->bind_param('i', $receipt_id);
+        $cur->execute();
+        $cur_row = $cur->get_result()->fetch_assoc();
+        $cur->close();
+        $prev_sale_id = $cur_row && $cur_row['matched_sale_id'] ? (int)$cur_row['matched_sale_id'] : null;
+
         $upd = $db->prepare(
             "UPDATE receipts
              SET matched_policy=NULL, matched_sale_id=NULL, match_status='pending', match_confidence=NULL
@@ -187,6 +224,11 @@ function manual_match($db, $uid, $receipt_id, $sale_id, $action, $reason, $run_i
     } else {
         throw new Exception("Invalid action");
     }
+
+    // Sync paid_status on the sale that just changed (and the previous
+    // one if this was a re-match across sales).
+    if ($prev_sale_id) refresh_paid_status($db, $prev_sale_id);
+    if ($sale_id)      refresh_paid_status($db, $sale_id);
 
     $log = $db->prepare(
         "INSERT INTO manual_match_log (run_id, receipt_id, sale_id, action, reason, user_id)
@@ -566,6 +608,9 @@ function run_matching_engine($db, $run_id, $date_from, $date_to, $product, $agen
     $upd->close();
     $flag_sale->close();
 
+    // Bring sales.paid_status in line with the new allocations from this run.
+    refresh_paid_status($db);
+
     return array(
         'total_sales'    => $total_sales,
         'total_receipts' => $total_receipts,
@@ -617,7 +662,7 @@ function calculate_variances($db, $run_id, $date_from, $date_to, $agent_filter) 
         FROM receipts r
         INNER JOIN sales sl ON r.matched_sale_id = sl.id
         WHERE sl.agent_id=? AND r.txn_date BETWEEN ? AND ?
-          AND r.match_status IN ('matched','variance')
+          AND r.match_status IN ('matched','variance','partial','currency_review')
     ");
 
     $s_chan = $db->prepare("
@@ -634,7 +679,7 @@ function calculate_variances($db, $run_id, $date_from, $date_to, $agent_filter) 
         FROM receipts r
         INNER JOIN sales sl ON r.matched_sale_id = sl.id
         WHERE sl.agent_id=? AND r.txn_date BETWEEN ? AND ?
-          AND r.match_status IN ('matched','variance')
+          AND r.match_status IN ('matched','variance','partial','currency_review')
         GROUP BY r.channel
     ");
 
@@ -718,11 +763,13 @@ function calculate_variances($db, $run_id, $date_from, $date_to, $agent_filter) 
 // bucketed by how old they are. Written onto reconciliation_runs.
 // ════════════════════════════════════════════════════════════
 function count_unmatched($db, $date_from, $date_to) {
+    // "Unmatched sale" now means anything not fully covered — that is,
+    // paid_status of unpaid OR partial. Currency_review sits in its own
+    // dedicated tab, so don't double-count it here.
     $unm_sales = $db->query("
         SELECT COUNT(*) c FROM sales s
-        LEFT JOIN receipts r ON r.matched_sale_id = s.id
         WHERE s.txn_date BETWEEN '$date_from' AND '$date_to'
-          AND r.id IS NULL
+          AND s.paid_status IN ('unpaid','partial')
     ")->fetch_assoc()['c'];
 
     $unm_rec = $db->query("
@@ -809,6 +856,36 @@ try {
         }
     }
 
+    // ── CANCEL A STUCK RUN ───────────────────────────────────
+    // Manual override for the stale-lock case. When the host's
+    // max_execution_time kills PHP mid-run, the row stays in
+    // 'running' status and blocks subsequent reconciliations. The
+    // 5-minute auto-expire below catches it eventually, but admins
+    // and reconcilers can cancel it immediately with this action.
+    if ($action === 'cancel_run') {
+        $cancel_id = (int)($_POST['run_id'] ?? 0);
+        if ($cancel_id <= 0) redirect_back('error', 'run_id required');
+
+        $u = $db->prepare(
+            "UPDATE reconciliation_runs
+                SET run_status   = 'failed',
+                    completed_at = NOW(),
+                    progress_msg = 'Cancelled by user'
+              WHERE id = ? AND run_status = 'running'"
+        );
+        $u->bind_param('i', $cancel_id);
+        $u->execute();
+        $changed = $u->affected_rows;
+        $u->close();
+
+        audit_log_entry($uid, 'RECON_RUN', "Cancelled run #$cancel_id");
+        if ($changed > 0) {
+            redirect_back('success', "Run #$cancel_id cancelled.");
+        } else {
+            redirect_back('error', "Run #$cancel_id was not in 'running' status (already complete, failed, or non-existent).");
+        }
+    }
+
     // NOTE: the old `upload_files` action that accepted raw file
     // uploads on the reconciliation page has been removed. Uploaders
     // now ingest files through /utilities/upload.php, and the recon
@@ -840,8 +917,22 @@ try {
     $validation_errors = validate_params(array('date_from'=>$date_from,'date_to'=>$date_to));
     if (!empty($validation_errors)) redirect_back('error', implode('. ', $validation_errors));
 
-    // Fix 9: Concurrency lock — reject if another run overlaps this period
-    // and is still in 'running' status.
+    // Concurrency lock — reject if another run overlaps this period and is
+    // still in 'running' status. But first, auto-expire stale 'running'
+    // rows: when the host's max_execution_time kills the PHP process
+    // mid-run, the row never gets updated to 'complete' / 'failed', and
+    // would otherwise block reconciliation forever. The host kills at
+    // ~60s on cPanel; 5 minutes is a safe staleness threshold — far
+    // longer than any in-flight run could legitimately be.
+    $db->query("
+        UPDATE reconciliation_runs
+           SET run_status   = 'failed',
+               completed_at = NOW(),
+               progress_msg = 'Auto-expired: PHP process killed before completion (host timeout)'
+         WHERE run_status = 'running'
+           AND started_at < (NOW() - INTERVAL 5 MINUTE)
+    ");
+
     $lock_stmt = $db->prepare("
         SELECT r.id, u.full_name FROM reconciliation_runs r
         JOIN users u ON r.run_by = u.id
@@ -854,7 +945,12 @@ try {
     $blocking = $lock_stmt->get_result()->fetch_assoc();
     $lock_stmt->close();
     if ($blocking) {
-        redirect_back('error', "Run #{$blocking['id']} is already in progress by {$blocking['full_name']}. Wait for it to complete or ask them to cancel.");
+        // Pass the blocking run id so the reconciliation page can render
+        // an inline Cancel button instead of forcing the user to navigate.
+        header('Location: ' . BASE_URL . '/modules/reconciliation.php?error='
+            . urlencode("Run #{$blocking['id']} is already in progress by {$blocking['full_name']}.")
+            . '&blocking_run_id=' . (int)$blocking['id']);
+        exit;
     }
 
     $period_label = date('F Y', strtotime($date_from));
@@ -903,12 +999,25 @@ try {
 
     $db->begin_transaction();
 
-    // Choose matcher engine — 'smart' (default) uses core/matcher.php (scoring-based);
-    // set matcher_engine='legacy' in system_settings to fall back to the original 5-tier engine.
+    // Choose matcher engine — 'smart' (default) uses core/matcher.php
+    // (scoring-based, indexed by amount bucket); 'legacy' falls back
+    // to the original 5-tier brute-force engine.
+    //
+    // Hosts that enforce a tight max_execution_time (cPanel shared
+    // hosting commonly caps at 60–90s and silently ignores
+    // set_time_limit) will reliably timeout on legacy for any monthly
+    // run. Force-switch them onto smart, since smart is much faster
+    // AND deadline-aware (it stops cleanly when the budget runs out
+    // instead of getting killed mid-write).
     $engine_row = $db->query("SELECT setting_value FROM system_settings WHERE setting_key='matcher_engine'")->fetch_assoc();
-    $engine_fn  = ($engine_row && $engine_row['setting_value'] === 'legacy')
-                    ? 'run_matching_engine'
-                    : 'smart_match_all';
+    $engine_setting = ($engine_row && !empty($engine_row['setting_value']))
+                        ? $engine_row['setting_value'] : 'smart';
+    $effective_max = (int)ini_get('max_execution_time');
+    if ($engine_setting === 'legacy' && $effective_max > 0 && $effective_max < 120) {
+        error_log("recon: forcing smart engine — max_execution_time={$effective_max}s is too short for legacy");
+        $engine_setting = 'smart';
+    }
+    $engine_fn = ($engine_setting === 'legacy') ? 'run_matching_engine' : 'smart_match_all';
     $result = $engine_fn($db, $run_id, $date_from, $date_to, $product, $agent_filter, $opts, $sales_upload_ids, $receipts_upload_ids);
     $variance = calculate_variances($db, $run_id, $date_from, $date_to, $agent_filter);
     $unmatched = count_unmatched($db, $date_from, $date_to);
@@ -1001,7 +1110,12 @@ try {
              . ", {$pending_receipts} pending" . $fx_bit;
     audit_log_entry($uid, 'RECON_RUN', "Run #$run_id complete: $summary in {$exec_time}s");
 
-    $msg = "Reconciliation complete. $summary.";
+    $partial = !empty($result['partial']);
+    $headline = $partial ? "Reconciliation paused — host time budget reached." : "Reconciliation complete.";
+    $tail = $partial
+        ? " $summary. The matches we found are saved. Re-run on the same period to continue with the rows we didn't get to."
+        : " $summary.";
+    $msg = $headline . $tail;
     if ($export_url) {
         $msg .= " <a href='$export_url' class='btn btn-sm btn-success' target='_blank'><i class='fas fa-download'></i> Download Report</a>";
     }

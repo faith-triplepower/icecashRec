@@ -17,9 +17,14 @@ function get_db() {
         // Connect using the credentials from config.php
         $db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME_CONST);
 
-        // If something went wrong (wrong password, DB down, etc), stop immediately
+        // If something went wrong (wrong password, DB down, etc), stop
+        // immediately. Don't render the raw mysqli error to the browser:
+        // it can include the database name, host, and even credentials in
+        // some failure modes. Log it server-side, show a generic message.
         if ($db->connect_error) {
-            die('Database connection failed: ' . $db->connect_error);
+            error_log('DB connect failed: ' . $db->connect_error);
+            http_response_code(503);
+            die('Service temporarily unavailable. Please try again shortly.');
         }
 
         // Use UTF-8 so special characters (accents, emojis) don't break

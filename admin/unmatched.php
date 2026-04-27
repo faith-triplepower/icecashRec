@@ -35,12 +35,20 @@ if (!isset($_GET['date_from']) && !isset($_GET['date_to'])) {
     $date_from = $_GET['date_from'] ?? date('Y-m-01');
     $date_to   = $_GET['date_to']   ?? date('Y-m-t');
 }
-$date_from = date('Y-m-d', strtotime($date_from));
-$date_to   = date('Y-m-d', strtotime($date_to));
-$tab       = $_GET['tab']    ?? 'receipts';        // receipts | sales | excluded | debits
-$status    = $_GET['status'] ?? 'all';             // all | pending | variance
-$age       = $_GET['age']    ?? 'all';             // all | fresh | aging | stale
-$channel   = $_GET['channel'] ?? '';
+// Defensive: a malformed ?date_from=foobar would make strtotime() return
+// false, and date(_, false) deprecates on PHP 8.1+. Fall back to month
+// boundaries when the input is unparseable.
+$df_ts = strtotime($date_from);
+$dt_ts = strtotime($date_to);
+$date_from = $df_ts ? date('Y-m-d', $df_ts) : date('Y-m-01');
+$date_to   = $dt_ts ? date('Y-m-d', $dt_ts) : date('Y-m-t');
+// Whitelist enum-like GET params before they reach SQL/branching logic
+// — even one query that drops the escape would otherwise turn these into
+// an injection vector. Default to a known-safe value when invalid.
+$tab     = in_array($_GET['tab']     ?? '', array('receipts','sales','excluded','debits','currency_review'), true) ? $_GET['tab']     : 'receipts';
+$status  = in_array($_GET['status']  ?? '', array('all','pending','variance'), true)                            ? $_GET['status']  : 'all';
+$age     = in_array($_GET['age']     ?? '', array('all','fresh','aging','stale'), true)                         ? $_GET['age']     : 'all';
+$channel = in_array($_GET['channel'] ?? '', array('','Bank POS','iPOS','EcoCash','Zimswitch','Broker'), true)   ? $_GET['channel'] : '';
 $q         = trim($_GET['q'] ?? '');
 $page      = max(1, (int)($_GET['page'] ?? 1));
 $per_page  = 10;
@@ -131,8 +139,15 @@ $cnt_debits   = (int)$debit_stats['c'];
 $sum_debits   = (float)$debit_stats['total'];
 $cnt_unmatched_sales = (int)$db->query("
     SELECT COUNT(*) c FROM sales s
-    LEFT JOIN receipts rm ON rm.matched_sale_id = s.id
-    WHERE s.txn_date BETWEEN '$date_from' AND '$date_to' AND rm.id IS NULL
+    WHERE s.txn_date BETWEEN '$date_from' AND '$date_to'
+      AND s.paid_status IN ('unpaid','partial')
+")->fetch_assoc()['c'];
+// Distinct sales sitting in currency_review for this period.
+$cnt_currency_review = (int)$db->query("
+    SELECT COUNT(DISTINCT s.id) c
+    FROM sales s
+    JOIN receipts r ON r.matched_sale_id = s.id AND r.match_status = 'currency_review'
+    WHERE s.txn_date BETWEEN '$date_from' AND '$date_to'
 ")->fetch_assoc()['c'];
 
 // Aging breakdown for pending+variance only
@@ -154,10 +169,71 @@ $channels = array('Bank POS','iPOS','EcoCash','Zimswitch','Broker');
 
 // ── Fetch the visible tab ──────────────────────────────
 $rows = array(); $total_rows = 0;
+$cr_groups = array(); // currency_review tab: per-sale group with attached receipts
 
-if ($tab === 'sales') {
-    // Unmatched sales
-    $s_where  = "s.txn_date BETWEEN ? AND ? AND r.id IS NULL";
+if ($tab === 'currency_review') {
+    // Pull every sale in the period that has at least one currency_review
+    // receipt, plus the receipts themselves so the UI can show the
+    // breakdown the reconciler needs to approve or reject.
+    $cnt_stmt = $db->prepare("
+        SELECT COUNT(DISTINCT s.id) c
+        FROM sales s
+        JOIN receipts r ON r.matched_sale_id = s.id AND r.match_status = 'currency_review'
+        WHERE s.txn_date BETWEEN ? AND ?
+    ");
+    $cnt_stmt->bind_param('ss', $date_from, $date_to);
+    $cnt_stmt->execute();
+    $total_rows = (int)$cnt_stmt->get_result()->fetch_assoc()['c'];
+    $cnt_stmt->close();
+
+    $sale_stmt = $db->prepare("
+        SELECT DISTINCT s.id, s.policy_number, s.txn_date, s.amount, s.currency,
+               s.payment_method, s.paid_status, a.agent_name
+        FROM sales s
+        JOIN agents a ON s.agent_id = a.id
+        JOIN receipts r ON r.matched_sale_id = s.id AND r.match_status = 'currency_review'
+        WHERE s.txn_date BETWEEN ? AND ?
+        ORDER BY s.txn_date ASC, s.id ASC
+        LIMIT ? OFFSET ?
+    ");
+    $sale_stmt->bind_param('ssii', $date_from, $date_to, $per_page, $offset);
+    $sale_stmt->execute();
+    $sale_rows = $sale_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $sale_stmt->close();
+
+    if (!empty($sale_rows)) {
+        $sale_ids = array_map(function($r){ return (int)$r['id']; }, $sale_rows);
+        $in_clause = implode(',', $sale_ids); // ints only — safe
+        $rec_rows = $db->query("
+            SELECT id, matched_sale_id, reference_no, txn_date, channel,
+                   source_name, amount, currency
+            FROM receipts
+            WHERE matched_sale_id IN ($in_clause)
+              AND match_status = 'currency_review'
+            ORDER BY txn_date, id
+        ")->fetch_all(MYSQLI_ASSOC);
+        $by_sale = array();
+        foreach ($rec_rows as $rr) $by_sale[(int)$rr['matched_sale_id']][] = $rr;
+        foreach ($sale_rows as $sr) {
+            $sid = (int)$sr['id'];
+            $attached = isset($by_sale[$sid]) ? $by_sale[$sid] : array();
+            $sum_zwg = 0; $sum_usd = 0;
+            foreach ($attached as $a) {
+                if ($a['currency'] === 'ZWG') $sum_zwg += (float)$a['amount'];
+                elseif ($a['currency'] === 'USD') $sum_usd += (float)$a['amount'];
+            }
+            $cr_groups[] = array(
+                'sale'     => $sr,
+                'receipts' => $attached,
+                'sum_zwg'  => $sum_zwg,
+                'sum_usd'  => $sum_usd,
+            );
+        }
+    }
+} elseif ($tab === 'sales') {
+    // Unmatched sales = nothing attached OR partially paid (sum < amount).
+    // Currency_review sales have their own tab so we exclude them here.
+    $s_where  = "s.txn_date BETWEEN ? AND ? AND s.paid_status IN ('unpaid','partial')";
     $s_params = array($date_from, $date_to);
     $s_types  = 'ss';
     if ($age === 'fresh')  $s_where .= " AND DATEDIFF(CURDATE(), s.txn_date) <= 7";
@@ -169,20 +245,28 @@ if ($tab === 'sales') {
         $s_params[] = $like; $s_params[] = $like; $s_params[] = $like;
         $s_types   .= 'sss';
     }
-    $c_stmt = $db->prepare("SELECT COUNT(*) c FROM sales s JOIN agents a ON s.agent_id=a.id LEFT JOIN receipts r ON r.matched_sale_id=s.id WHERE $s_where");
+    $c_stmt = $db->prepare("SELECT COUNT(*) c FROM sales s JOIN agents a ON s.agent_id=a.id WHERE $s_where");
     $c_stmt->bind_param($s_types, ...$s_params);
     $c_stmt->execute();
     $total_rows = (int)$c_stmt->get_result()->fetch_assoc()['c'];
     $c_stmt->close();
 
     $s_params[] = $per_page; $s_params[] = $offset; $s_types .= 'ii';
+    // Pull received-so-far per sale so partial rows can show progress
+    // ("3 of 5 receipts in, $80 of $100"). Subquery scoped to allocated
+    // statuses only.
     $stmt = $db->prepare("
         SELECT s.id, s.policy_number, s.txn_date, s.payment_method, s.amount, s.currency,
-               s.terminal_id, a.agent_name, a.id agent_id,
-               DATEDIFF(CURDATE(), s.txn_date) days_old
+               s.terminal_id, s.paid_status, a.agent_name, a.id agent_id,
+               DATEDIFF(CURDATE(), s.txn_date) days_old,
+               (SELECT COALESCE(SUM(amount),0) FROM receipts r
+                  WHERE r.matched_sale_id = s.id
+                    AND r.match_status IN ('matched','partial','variance','currency_review')) AS received,
+               (SELECT COUNT(*) FROM receipts r
+                  WHERE r.matched_sale_id = s.id
+                    AND r.match_status IN ('matched','partial','variance','currency_review')) AS rec_count
         FROM sales s
         JOIN agents a ON s.agent_id = a.id
-        LEFT JOIN receipts r ON r.matched_sale_id = s.id
         WHERE $s_where
         ORDER BY s.txn_date ASC
         LIMIT ? OFFSET ?
@@ -271,7 +355,7 @@ function link_with($extra) {
       <option value="stale" <?= $age==='stale'?'selected':'' ?>>Stale (30+d)</option>
     </select>
   </div>
-  <?php if ($tab !== 'sales' && $tab !== 'excluded'): ?>
+  <?php if ($tab !== 'sales' && $tab !== 'excluded' && $tab !== 'currency_review'): ?>
   <div>
     <label style="font-size:11px;color:#666;display:block">Status</label>
     <select name="status" class="form-select" style="padding:6px 8px">
@@ -321,7 +405,7 @@ function link_with($extra) {
 <?php endif; ?>
 
 <!-- Aging summary cards (visible on receipts tabs only) -->
-<?php if ($tab !== 'sales' && $tab !== 'excluded' && $tab !== 'debits'): ?>
+<?php if ($tab !== 'sales' && $tab !== 'excluded' && $tab !== 'debits' && $tab !== 'currency_review'): ?>
 <div class="stat-grid">
   <div class="stat-card green">
     <div class="stat-label">Fresh (0–7 days)</div>
@@ -356,20 +440,75 @@ function link_with($extra) {
 <div class="tab-bar" style="margin-top:16px">
   <a class="tab-item <?= $tab==='receipts'?'active':'' ?>" href="<?= link_with(array('tab'=>'receipts','page'=>1)) ?>">Unmatched Receipts (<?= $cnt_pending + $cnt_variance ?>)</a>
   <a class="tab-item <?= $tab==='sales'?'active':'' ?>"    href="<?= link_with(array('tab'=>'sales','page'=>1)) ?>">Unmatched Sales (<?= $cnt_unmatched_sales ?>)</a>
+  <a class="tab-item <?= $tab==='currency_review'?'active':'' ?>" href="<?= link_with(array('tab'=>'currency_review','page'=>1)) ?>">Currency Review (<?= $cnt_currency_review ?>)</a>
   <a class="tab-item <?= $tab==='excluded'?'active':'' ?>" href="<?= link_with(array('tab'=>'excluded','page'=>1)) ?>">Excluded (<?= $cnt_excluded ?>)</a>
   <a class="tab-item <?= $tab==='debits'?'active':'' ?>"   href="<?= link_with(array('tab'=>'debits','page'=>1)) ?>">Debits / Outflows (<?= $cnt_debits ?>)</a>
 </div>
 
 <!-- Table -->
 <div class="panel">
-<?php if ($tab === 'sales'): ?>
+<?php if ($tab === 'currency_review'): ?>
+  <div style="padding:14px 18px;background:#fff8e1;border-bottom:1px solid #f0e0a0;font-size:12px;color:#5a4500">
+    <strong>Currency review queue.</strong> Each card below is one sale with receipts attached in a different currency. Approve to count them as covered (uses the sale's currency for variance), or reject to send the receipts back to the unmatched pool.
+  </div>
+  <?php if (empty($cr_groups)): ?>
+    <div class="dim" style="text-align:center;padding:24px">✓ No currency-review items in this period.</div>
+  <?php else: foreach ($cr_groups as $g):
+        $sale = $g['sale']; $sid = (int)$sale['id'];
+  ?>
+    <div style="padding:14px 18px;border-bottom:1px solid #eee">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div>
+          <div class="mono" style="font-weight:600;color:var(--accent2)"><?= htmlspecialchars($sale['policy_number']) ?></div>
+          <div class="dim" style="font-size:11px;margin-top:2px">
+            <?= htmlspecialchars($sale['agent_name']) ?> &middot; <?= htmlspecialchars($sale['payment_method']) ?> &middot; <?= $sale['txn_date'] ?>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div class="mono" style="font-weight:600">Sale: <?= htmlspecialchars($sale['currency']) ?> <?= number_format($sale['amount'], 2) ?></div>
+          <div class="mono dim" style="font-size:11px">Received: ZWG <?= number_format($g['sum_zwg'], 2) ?> &middot; USD <?= number_format($g['sum_usd'], 2) ?></div>
+        </div>
+      </div>
+      <table class="data-table" style="margin-top:10px">
+        <thead><tr><th>Reference</th><th>Date</th><th>Channel</th><th>Source</th><th>Amount</th></tr></thead>
+        <tbody>
+        <?php foreach ($g['receipts'] as $rr): ?>
+          <tr>
+            <td class="mono" style="font-size:11px"><?= htmlspecialchars($rr['reference_no']) ?></td>
+            <td class="mono dim" style="font-size:11px"><?= $rr['txn_date'] ?></td>
+            <td class="dim"><?= htmlspecialchars($rr['channel']) ?></td>
+            <td class="dim" style="font-size:11px"><?= htmlspecialchars($rr['source_name']) ?></td>
+            <td class="mono <?= $rr['currency']!==$sale['currency']?'':'dim' ?>" style="font-weight:<?= $rr['currency']!==$sale['currency']?'600':'400' ?>">
+              <?= htmlspecialchars($rr['currency']) ?> <?= number_format($rr['amount'], 2) ?>
+              <?php if ($rr['currency']!==$sale['currency']): ?>
+                <span class="badge variance" style="margin-left:6px">FX</span>
+              <?php endif; ?>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+        </tbody>
+      </table>
+      <form method="POST" action="../process/process_unmatched.php" style="display:flex;gap:8px;margin-top:10px;align-items:center">
+        <?= csrf_field() ?>
+        <input type="hidden" name="sale_id" value="<?= $sid ?>">
+        <input type="text" name="note" placeholder="Optional note (FX rate, source...)" class="form-input" style="flex:1;padding:6px 8px;font-size:12px" maxlength="500">
+        <button type="submit" name="action" value="currency_review_approve" class="btn btn-primary btn-sm" onclick="return confirm('Approve this allocation? Receipts will count toward sale coverage.')"><i class="fa-solid fa-check"></i> Approve</button>
+        <button type="submit" name="action" value="currency_review_reject" class="btn btn-ghost btn-sm" onclick="return confirm('Reject? Receipts will be detached and sent back to pending.')"><i class="fa-solid fa-xmark"></i> Reject</button>
+      </form>
+    </div>
+  <?php endforeach; endif; ?>
+<?php elseif ($tab === 'sales'): ?>
   <table class="data-table">
-    <thead><tr><th>Policy #</th><th>Date</th><th>Method</th><th>Agent</th><th>Amount</th><th>Age</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Policy #</th><th>Date</th><th>Method</th><th>Agent</th><th>Amount</th><th>Coverage</th><th>Age</th><th>Actions</th></tr></thead>
     <tbody>
       <?php foreach ($rows as $r): ?>
       <?php
         $bucket = $r['days_old'] <= 7 ? 'fresh' : ($r['days_old'] <= 30 ? 'aging' : 'stale');
         $bucket_class = $bucket === 'fresh' ? 'reconciled' : ($bucket === 'aging' ? 'pending' : 'variance');
+        $is_partial = $r['paid_status'] === 'partial';
+        $rec_count  = (int)($r['rec_count'] ?? 0);
+        $received   = (float)($r['received'] ?? 0);
+        $pct = ($r['amount'] > 0) ? min(100, round(($received / $r['amount']) * 100)) : 0;
       ?>
       <tr>
         <td class="mono" style="color:var(--accent2)"><?= htmlspecialchars($r['policy_number']) ?></td>
@@ -377,6 +516,15 @@ function link_with($extra) {
         <td><?= htmlspecialchars($r['payment_method']) ?></td>
         <td><?= htmlspecialchars($r['agent_name']) ?></td>
         <td class="mono"><?= htmlspecialchars($r['currency']) ?> <?= number_format($r['amount'], 2) ?></td>
+        <td>
+          <?php if ($is_partial): ?>
+            <span class="badge variance">PARTIAL</span>
+            <div class="dim" style="font-size:10px;margin-top:2px"><?= $rec_count ?>/10 receipts &middot; <?= number_format($received, 2) ?> (<?= $pct ?>%)</div>
+          <?php else: ?>
+            <span class="badge pending">UNPAID</span>
+            <div class="dim" style="font-size:10px;margin-top:2px">No receipts attached</div>
+          <?php endif; ?>
+        </td>
         <td><span class="badge <?= $bucket_class ?>"><?= $r['days_old'] ?>d</span></td>
         <td>
           <a class="btn btn-ghost btn-sm" href="agent_detail.php?id=<?= (int)$r['agent_id'] ?>">Agent</a>
@@ -385,7 +533,7 @@ function link_with($extra) {
       </tr>
       <?php endforeach; ?>
       <?php if (empty($rows)): ?>
-      <tr><td colspan="7" class="dim" style="text-align:center;padding:20px">✓ No unmatched sales in this range.</td></tr>
+      <tr><td colspan="8" class="dim" style="text-align:center;padding:20px">✓ No unmatched sales in this range.</td></tr>
       <?php endif; ?>
     </tbody>
   </table>

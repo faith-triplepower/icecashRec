@@ -15,11 +15,14 @@ $uid  = (int)$user['id'];
 $success = htmlspecialchars($_GET['success'] ?? '');
 $error   = htmlspecialchars($_GET['error']   ?? '');
 
-// Filters
-$filter_status   = $_GET['filter']   ?? 'pending';       // pending | reviewed | resolved | dismissed | all
-$filter_priority = $_GET['priority'] ?? '';              // low | medium | high | critical
-$filter_type     = $_GET['type']     ?? '';              // variance | unmatched | currency_mismatch | manual
-$filter_assigned = $_GET['assigned'] ?? 'mine';          // mine | all | unassigned | <user_id>
+// Filters — whitelist enum values defensively. $filter_assigned can also
+// be a numeric user id, so allow integers in addition to the named modes.
+$filter_status   = in_array($_GET['filter']   ?? '', array('pending','reviewed','resolved','dismissed','all'), true) ? $_GET['filter']   : 'pending';
+$filter_priority = in_array($_GET['priority'] ?? '', array('','low','medium','high','critical'), true)               ? $_GET['priority'] : '';
+$filter_type     = in_array($_GET['type']     ?? '', array('','variance','unmatched','currency_mismatch','manual'), true) ? $_GET['type'] : '';
+$raw_assigned    = $_GET['assigned'] ?? 'mine';
+$filter_assigned = (in_array($raw_assigned, array('mine','all','unassigned'), true) || ctype_digit((string)$raw_assigned))
+                    ? $raw_assigned : 'mine';
 $page     = max(1, (int)($_GET['page'] ?? 1));
 $per_page = 10;
 $offset   = ($page - 1) * $per_page;
@@ -244,8 +247,8 @@ function link_with($extra = array()) {
         <td style="font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><?= htmlspecialchars($e['action_detail']) ?></td>
         <td class="mono" style="font-size:11px">
           <?php if ($e['variance_zwg'] || $e['variance_usd']): ?>
-          ZWG <?= number_format($e['variance_zwg'], 0) ?><br>
-          <span class="dim">USD <?= number_format($e['variance_usd'], 0) ?></span>
+          ZWG <?= number_format($e['variance_zwg'] ?? 0, 0) ?><br>
+          <span class="dim">USD <?= number_format($e['variance_usd'] ?? 0, 0) ?></span>
           <?php else: ?>
           —
           <?php endif; ?>

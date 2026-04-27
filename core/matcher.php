@@ -13,13 +13,17 @@
 //   Pass 2 — LONELY RECEIPT: only one exact-amount sale in ±14 days.
 //   Pass 3 — LONELY SALE:    only one exact-amount receipt in ±14 days.
 //   Pass 4 — BATCH:  1 receipt = Σ sales within ±2 days.
-//   Pass 5 — SPLIT:  1 sale = Σ of up to 10 receipts, same channel, ±30 days.
+//   Pass 5 — SPLIT:  1 sale = Σ ≤10 receipts in the same calendar month.
+//                    Mixed-currency allocations land in 'currency_review'
+//                    until a reconciler approves them.
 //   Pass 6 — FUZZY FALLBACK: widened window, lower threshold.
 //
 // Manual matches are never touched. Duplicates in sales/receipts
 // (same policy_number or reference_no on multiple rows) are fully
 // supported — we key on id, not policy/reference.
 // ============================================================
+
+require_once __DIR__ . '/allocation.php';
 
 // ─────────────────────────────────────────────────────────────
 // SHARED HELPERS
@@ -65,25 +69,6 @@ function match_noise_words() {
         'HARARE','HRE','BRANCH','OFFICE','LTD','PVT','LIMITED','PRIVATE',
         'BANK','COMPANY','CO','THE','AND','AT','FROM','TO',
     );
-}
-
-// Recursive subset-sum search for split-payment matching.
-// Returns the first subset of $pool (size 2..$max_parts) whose 'amt' values
-// sum to $target within 0.01, or null. Pool must be sorted ascending by 'amt'
-// so the >target prune fires early. Pool entries: array('id','amt',...).
-function match_find_split_subset($pool, $target, $max_parts, $start = 0, $current = array(), $sum = 0.0) {
-    $depth = count($current);
-    if ($depth >= 2 && abs($sum - $target) < 0.01) return $current;
-    if ($depth >= $max_parts) return null;
-    if ($sum - $target > 0.01) return null; // amounts are positive — overshoot can't recover
-    $n = count($pool);
-    for ($i = $start; $i < $n; $i++) {
-        $next = $current;
-        $next[] = $pool[$i];
-        $found = match_find_split_subset($pool, $target, $max_parts, $i + 1, $next, $sum + $pool[$i]['amt']);
-        if ($found) return $found;
-    }
-    return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -339,6 +324,26 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     $FUZZY_WINDOW_DAYS   = 10;
     $BATCH_MIN_AMOUNT    = 100;
 
+    // ── Deadline awareness ──
+    // Shared hosts (cPanel etc.) often enforce max_execution_time and
+    // ignore set_time_limit(). Honor whatever budget we actually have,
+    // leave 15% headroom for variance calc + finalization, and stop
+    // cleanly when out of time. Anything we've matched is already
+    // persisted in the DB — re-running picks up where we left off
+    // because matched receipts no longer carry status='pending'.
+    $start_ts    = microtime(true);
+    $eff_max     = (int)ini_get('max_execution_time');
+    $budget_secs = $eff_max > 0 ? max(15, (int)round($eff_max * 0.85)) : 600;
+    $deadline_hit = false;
+    $over_deadline = function() use ($start_ts, $budget_secs, &$deadline_hit) {
+        if ($deadline_hit) return true;
+        if ((microtime(true) - $start_ts) >= $budget_secs) {
+            $deadline_hit = true;
+            return true;
+        }
+        return false;
+    };
+
     // ── Sanitize filters ──
     $sales_upload_ids    = array_values(array_filter(array_map('intval', (array)$sales_upload_ids)));
     $receipts_upload_ids = array_values(array_filter(array_map('intval', (array)$receipts_upload_ids)));
@@ -504,6 +509,7 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 1 — MAIN SCORING
     // ═══════════════════════════════════════════════════════════
+    if ($over_deadline()) goto finalize_match;
     set_progress($db, $run_id, 40, 'Pass 1: scoring pass');
 
     $processed = 0;
@@ -521,6 +527,7 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         if ($processed % $report_every === 0) {
             $pct = 40 + (int)floor(30 * ($processed / max(1, $total_receipts)));
             set_progress($db, $run_id, $pct, "Pass 1: scoring ($processed/$total_receipts)");
+            if ($over_deadline()) break;
         }
         if (isset($claimed_receipts[$receipt['id']])) continue;
         $r_amt = $receipt['_amt'];
@@ -585,6 +592,7 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 2 — LONELY RECEIPT: one exact-amount candidate in ±14 days
     // ═══════════════════════════════════════════════════════════
+    if ($over_deadline()) goto finalize_match;
     set_progress($db, $run_id, 72, 'Pass 2: lonely-receipt pass');
 
     $lonely_secs = $LONELY_WINDOW_DAYS * 86400;
@@ -628,6 +636,7 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 3 — LONELY SALE: one exact-amount unmatched receipt in ±14 days
     // ═══════════════════════════════════════════════════════════
+    if ($over_deadline()) goto finalize_match;
     set_progress($db, $run_id, 78, 'Pass 3: lonely-sale pass');
 
     foreach ($sales as $sale) {
@@ -661,6 +670,7 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // ═══════════════════════════════════════════════════════════
     // PASS 4 — BATCH: 1 receipt = sum of N unmatched sales ±2 days
     // ═══════════════════════════════════════════════════════════
+    if ($over_deadline()) goto finalize_match;
     set_progress($db, $run_id, 83, 'Pass 4: batch settlement');
 
     $unmatched_receipts = array();
@@ -679,6 +689,7 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     });
 
     foreach ($unmatched_receipts as $receipt) {
+        if ($over_deadline()) break;
         if (isset($claimed_receipts[$receipt['id']])) continue;
         $r_amt = $receipt['_amt'];
         $r_ts  = $receipt['_ts'];
@@ -730,63 +741,98 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     }
 
     // ═══════════════════════════════════════════════════════════
-    // PASS 5 — SPLIT: 1 sale = sum of up to 10 unmatched receipts,
-    // same channel, within a ±30-day window. A $20k sale must always
-    // resolve to $20k of receipts; if the customer paid in instalments
-    // we still find them as long as they land inside the month window.
+    // PASS 5 — SPLIT: 1 sale = Σ ≤10 receipts in the same calendar month
+    //
+    // For each still-unclaimed sale, gather receipts that
+    //   (a) fall in the calendar month of sale.txn_date
+    //   (b) carry a linkage signal to the sale — the sale's policy
+    //       tokens appear in the receipt text, OR they share a
+    //       terminal_id. (Pure month + amount alone would create
+    //       too many false positives.)
+    // Then ask find_split_subset() for any combo summing to >= sale.amount,
+    // capped at SPLIT_MAX_RECEIPTS_PER_SALE (10) parts. Mixed-currency
+    // results are written as 'currency_review' so the reconciler can
+    // approve before they count toward coverage.
     // ═══════════════════════════════════════════════════════════
+    if ($over_deadline()) goto finalize_match;
     set_progress($db, $run_id, 87, 'Pass 5: split payments');
 
-    $SPLIT_WINDOW_DAYS = 30;
-    $SPLIT_WINDOW_SECS = $SPLIT_WINDOW_DAYS * 86400;
-    $SPLIT_MAX_PARTS   = 10;
-    $SPLIT_POOL_CAP    = 20;
+    // Index receipts by calendar month for the candidate scan.
+    $receipts_by_month = array();
+    foreach ($receipts as $r) {
+        $ts = $r['_ts'];
+        if (!$ts) continue;
+        $key = date('Y-m', $ts);
+        $receipts_by_month[$key][] = $r;
+    }
 
     foreach ($sales as $sale) {
+        if ($over_deadline()) break;
         if (isset($claimed_sales[$sale['id']])) continue;
         $s_amt = (float)($sale['amount'] ?? 0);
         if ($s_amt <= 0) continue;
-        $nch   = $sale['_chan_norm'];
-        $s_ts  = (int)($sale['_ts'] ?? 0);
-        if (!$s_ts) continue;
+        if (!$sale['_ts']) continue;
 
+        $month_key = date('Y-m', $sale['_ts']);
+        if (!isset($receipts_by_month[$month_key])) continue;
+
+        $sale_term   = $sale['_term'];
+        $sale_tokens = $sale['_tokens'];
+        $sale_cur    = $sale['_cur'];
+
+        // Build the candidate pool. Filter by linkage signal so we don't
+        // pull every same-month receipt — that would create runaway DFS
+        // and false positives at scale.
         $pool = array();
-        foreach ($receipts as $r) {
+        foreach ($receipts_by_month[$month_key] as $r) {
             if (isset($claimed_receipts[$r['id']])) continue;
-            if ($r['_chan_norm'] !== $nch) continue;
-            $r_amt = (float)$r['_amt'];
-            if ($r_amt <= 0 || $r_amt > $s_amt + 0.01) continue; // single receipt can't exceed sale
-            $r_ts = (int)($r['_ts'] ?? 0);
-            if (!$r_ts) continue;
-            $dt = $r_ts > $s_ts ? $r_ts - $s_ts : $s_ts - $r_ts;
-            if ($dt > $SPLIT_WINDOW_SECS) continue;
-            $pool[] = array('id'=>$r['id'], 'amt'=>$r_amt, 'receipt_obj'=>$r);
-            if (count($pool) >= $SPLIT_POOL_CAP) break;
+            if ($r['_amt'] <= 0) continue;
+
+            $linked = false;
+            if ($sale_term !== '' && $r['_term'] === $sale_term) {
+                $linked = true;
+            } elseif (!empty($sale_tokens) && $r['_text_upper'] !== '') {
+                foreach ($sale_tokens as $tok) {
+                    if (strpos($r['_text_upper'], $tok) !== false) { $linked = true; break; }
+                }
+            }
+            if (!$linked) continue;
+
+            $pool[] = array(
+                'id'  => $r['id'],
+                'amt' => (float)$r['_amt'],
+                'cur' => $r['_cur'],
+                'obj' => $r,
+            );
+            if (count($pool) >= 25) break; // hard cap — keeps DFS bounded
         }
         if (count($pool) < 2) continue;
 
-        // Sort ascending by amount so the overshoot prune in the recursive
-        // search fires as early as possible.
-        usort($pool, function($a, $b) {
-            if ($a['amt'] == $b['amt']) return 0;
-            return ($a['amt'] < $b['amt']) ? -1 : 1;
-        });
+        $found = find_split_subset($pool, $s_amt, SPLIT_MAX_RECEIPTS_PER_SALE);
+        if (!$found || count($found) < 2) continue;
 
-        $found = match_find_split_subset($pool, $s_amt, $SPLIT_MAX_PARTS);
-        if ($found) {
-            try {
-                foreach ($found as $r) {
-                    $upd->bind_param('sissi', $sale['policy_number'], $sale['id'],
-                                     'matched', 'medium', $r['id']);
-                    $upd->execute();
-                    $claimed_receipts[$r['id']] = true;
-                    $matched_count++;
-                    $score_hist['medium']++;
-                    $pass_counts['p5']++;
-                }
-                $claimed_sales[$sale['id']] = true;
-            } catch (Throwable $e) { /* skip */ }
+        // Currency cohesion: if any picked receipt's currency differs from
+        // the sale's, this becomes a currency_review case until approved.
+        $mixed = false;
+        foreach ($found as $r) {
+            if ($sale_cur !== '' && $r['cur'] !== '' && $r['cur'] !== $sale_cur) {
+                $mixed = true; break;
+            }
         }
+        $rec_status = $mixed ? 'currency_review' : 'matched';
+
+        try {
+            foreach ($found as $r) {
+                $upd->bind_param('sissi', $sale['policy_number'], $sale['id'],
+                                 $rec_status, 'medium', $r['id']);
+                $upd->execute();
+                $claimed_receipts[$r['id']] = true;
+                $matched_count++;
+                $score_hist['medium']++;
+                $pass_counts['p5']++;
+            }
+            $claimed_sales[$sale['id']] = true;
+        } catch (Throwable $e) { /* skip */ }
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -794,11 +840,14 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
     // Anything score >= 35 within ±10 days, amount ±5%, matches with 'low' confidence
     // CAPPED at 50 candidates per receipt to prevent runaway on large datasets.
     // ═══════════════════════════════════════════════════════════
+    if ($over_deadline()) goto finalize_match;
     set_progress($db, $run_id, 91, 'Pass 6: fuzzy fallback');
     $FUZZY_MAX_CANDIDATES = 50;
 
     $fuzzy_secs = $FUZZY_WINDOW_DAYS * 86400;
+    $fuzzy_proc = 0;
     foreach ($receipts as $receipt) {
+        if (($fuzzy_proc++ & 31) === 0 && $over_deadline()) break;
         if (isset($claimed_receipts[$receipt['id']])) continue;
         $r_amt = $receipt['_amt'];
         if ($r_amt <= 0) continue;
@@ -846,13 +895,20 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         }
     }
 
+    finalize_match:
     $upd->close();
     $flag_sale->close();
 
+    // Recompute sales.paid_status across the board so dashboards
+    // reflect the new allocations from this run.
+    refresh_paid_status($db);
+
+    $partial_note = $deadline_hit ? ' [PARTIAL — host time budget reached, re-run to continue]' : '';
     $summary = "Matched {$matched_count}/{$total_sales} "
              . "(H:{$score_hist['high']} M:{$score_hist['medium']} L:{$score_hist['low']} "
              . "| P0:{$pass_counts['p0']} P1:{$pass_counts['p1']} P2:{$pass_counts['p2']} "
-             . "P3:{$pass_counts['p3']} P4:{$pass_counts['p4']} P5:{$pass_counts['p5']} P6:{$pass_counts['p6']})";
+             . "P3:{$pass_counts['p3']} P4:{$pass_counts['p4']} P5:{$pass_counts['p5']} P6:{$pass_counts['p6']})"
+             . $partial_note;
     set_progress($db, $run_id, 94, substr($summary, 0, 200));
 
     return array(
@@ -860,5 +916,6 @@ function smart_match_all($db, $run_id, $date_from, $date_to, $product, $agent_fi
         'total_receipts' => $total_receipts,
         'matched_count'  => $matched_count,
         'fx_flagged'     => $fx_flagged,
+        'partial'        => $deadline_hit,
     );
 }

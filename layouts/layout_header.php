@@ -263,6 +263,11 @@ $user = current_user();
                     <i class="fa-solid fa-shield-halved fa-fw"></i> Admin Panel
                 </a>
             </li>
+            <li class="<?= ($active_nav==='db_admin') ? 'active' : '' ?>">
+                <a href="/icecashRec/admin/db_admin.php" style="color:rgba(255,220,100,0.9) !important">
+                    <i class="fa-solid fa-database fa-fw"></i> Database
+                </a>
+            </li>
             <?php endif; ?>
 
         </ul>

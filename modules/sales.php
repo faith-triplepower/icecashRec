@@ -180,9 +180,19 @@ $total_rows  = $db->query("SELECT COUNT(*) AS c FROM sales s WHERE $w")->fetch_a
       <span class="panel-subtitle"><?= number_format($total_rows) ?> records</span>
     </div>
     <table class="data-table">
-      <thead><tr><th>Policy #</th><th>Date</th><th>Agent</th><th>Product</th><th>Method</th><th>Amount</th><th>Currency</th><th>Source</th><th>Flag</th></tr></thead>
+      <thead><tr><th>Policy #</th><th>Date</th><th>Agent</th><th>Product</th><th>Method</th><th>Amount</th><th>Currency</th><th>Source</th><th>Paid</th><th>Flag</th></tr></thead>
       <tbody>
-        <?php foreach ($rows as $s): ?>
+        <?php
+        // Map paid_status → badge class + label. Anything not yet
+        // backfilled (NULL) renders as a quiet em-dash.
+        $paid_badges = array(
+            'paid'            => array('reconciled', 'PAID'),
+            'overpaid'        => array('reconciled', 'OVERPAID'),
+            'partial'         => array('variance',   'PARTIAL'),
+            'currency_review' => array('pending',    'FX REVIEW'),
+            'unpaid'          => array('pending',    'UNPAID'),
+        );
+        foreach ($rows as $s): ?>
         <tr>
           <td class="mono" style="color:var(--accent2)"><?= htmlspecialchars($s['policy_number']) ?></td>
           <td class="mono dim"><?= $s['txn_date'] ?></td>
@@ -192,13 +202,23 @@ $total_rows  = $db->query("SELECT COUNT(*) AS c FROM sales s WHERE $w")->fetch_a
           <td class="mono"><?= number_format($s['amount']) ?></td>
           <td><span class="badge <?= $s['currency']==='USD'?'variance':'reconciled' ?>"><?= $s['currency'] ?></span></td>
           <td class="dim" style="font-size:11px"><?= $s['source_system'] ?></td>
+          <td>
+            <?php
+              $ps = isset($s['paid_status']) ? $s['paid_status'] : null;
+              if ($ps && isset($paid_badges[$ps])):
+                list($cls, $lbl) = $paid_badges[$ps]; ?>
+              <span class="badge <?= $cls ?>" style="font-size:10px"><?= $lbl ?></span>
+            <?php else: ?>
+              <span class="dim">—</span>
+            <?php endif; ?>
+          </td>
           <td style="color:var(--warn);font-size:11px"><?= $s['currency_flag'] ? '⚠ USD paid' : '—' ?></td>
         </tr>
         <?php endforeach; ?>
         <?php if (empty($rows)): ?>
-        <tr><td colspan="9" class="dim" style="text-align:center;padding:20px">No sales records found for this period. Upload a sales file first.</td></tr>
+        <tr><td colspan="10" class="dim" style="text-align:center;padding:20px">No sales records found for this period. Upload a sales file first.</td></tr>
         <?php else: ?>
-        <tr><td colspan="9" class="dim" style="text-align:center;padding:14px;font-size:11px">
+        <tr><td colspan="10" class="dim" style="text-align:center;padding:14px;font-size:11px">
           <?php
             // Preserve every current GET filter on Prev/Next links so paginating
             // doesn't silently drop the user's product/agent/currency picks.

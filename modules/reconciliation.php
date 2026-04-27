@@ -62,7 +62,21 @@ $receipts_uploads = array_values(array_filter($available_uploads, function($u) {
 </div>
 
 <?php if ($success): ?><div class="alert alert-success">✓ <?= $success ?></div><?php endif; ?>
-<?php if ($error):   ?><div class="alert alert-danger">⚠ <?= $error ?></div><?php endif; ?>
+<?php if ($error): ?>
+  <div class="alert alert-danger" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <span>⚠ <?= $error ?></span>
+    <?php $blocking_run_id = (int)($_GET['blocking_run_id'] ?? 0); if ($blocking_run_id > 0): ?>
+    <form method="POST" action="../process/process_reconciliation.php" style="margin:0" onsubmit="return confirm('Cancel run #<?= $blocking_run_id ?>? It will be marked failed so you can start a new one.');">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="cancel_run">
+      <input type="hidden" name="run_id" value="<?= $blocking_run_id ?>">
+      <button type="submit" class="btn btn-primary btn-sm" style="background:#c0392b;border-color:#c0392b;font-weight:700">
+        <i class="fa-solid fa-xmark"></i> Cancel run #<?= $blocking_run_id ?>
+      </button>
+    </form>
+    <?php endif; ?>
+  </div>
+<?php endif; ?>
 
 <!-- Tabs Navigation -->
 <div class="tab-bar" style="margin-bottom:20px">
@@ -251,7 +265,17 @@ $receipts_uploads = array_values(array_filter($available_uploads, function($u) {
           <?= $r['run_status']==='complete'?'COMPLETE':($r['run_status']==='failed'?'FAILED':'RUNNING') ?></span></td>
         <td class="mono" style="font-weight:600;color:#00a950">-</td>
         <td class="mono" style="font-weight:600;color:#c0392b">-</td>
-        <td><a href="reconciliation_results.php?run_id=<?= $r['id'] ?>" class="btn btn-ghost btn-sm" style="font-weight:700"><i class="fa-solid fa-eye"></i> VIEW DETAILS</a></td>
+        <td>
+          <a href="reconciliation_results.php?run_id=<?= $r['id'] ?>" class="btn btn-ghost btn-sm" style="font-weight:700"><i class="fa-solid fa-eye"></i> VIEW DETAILS</a>
+          <?php if ($r['run_status'] === 'running'): ?>
+          <form method="POST" action="../process/process_reconciliation.php" style="display:inline" onsubmit="return confirm('Cancel run #<?= (int)$r['id'] ?>? This marks it as failed so a new run can start.');">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="cancel_run">
+            <input type="hidden" name="run_id" value="<?= (int)$r['id'] ?>">
+            <button type="submit" class="btn btn-ghost btn-sm" style="color:#c0392b;font-weight:700"><i class="fa-solid fa-xmark"></i> CANCEL</button>
+          </form>
+          <?php endif; ?>
+        </td>
       </tr>
       <?php endforeach; ?>
       <?php if (empty($runs)): ?>

@@ -303,7 +303,9 @@ $is_reconciled = (abs($var_zwg) < 0.01 && abs($var_usd) < 0.01);
         <div class="signoff-value">
           <?php if ($s['reviewed_by_name']): ?>
             <strong><?= htmlspecialchars($s['reviewed_by_name']) ?></strong><br>
-            <span class="dim"><?= date('Y-m-d H:i', strtotime($s['reviewed_at'])) ?></span>
+            <?php if (!empty($s['reviewed_at'])): ?>
+              <span class="dim"><?= date('Y-m-d H:i', strtotime($s['reviewed_at'])) ?></span>
+            <?php endif; ?>
           <?php else: ?>
             <div class="signoff-line"></div>
             <span class="dim">(signature)</span>

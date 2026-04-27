@@ -9,6 +9,7 @@
 
 require_once '../core/auth.php';
 require_once '../core/notifications.php';
+require_once '../core/allocation.php';
 require_role(['Manager','Reconciler','Admin']);
 csrf_verify();
 
@@ -196,22 +197,38 @@ try {
         if (!$receipt_id || !$sales_id) redirect_back('error', 'Invalid transaction IDs.');
 
         $sale = null;
-        $s_stmt = $db->prepare("SELECT id, policy_number FROM sales WHERE id=?");
+        $s_stmt = $db->prepare("SELECT id, policy_number, currency FROM sales WHERE id=?");
         $s_stmt->bind_param('i', $sales_id);
         $s_stmt->execute();
         $sale = $s_stmt->get_result()->fetch_assoc();
         $s_stmt->close();
         if (!$sale) redirect_back('error', 'Sale not found.');
 
+        // Capture the previous sale link (for paid_status refresh) and
+        // enforce the 10-receipt cap.
+        $cur = $db->prepare("SELECT matched_sale_id, currency FROM receipts WHERE id=?");
+        $cur->bind_param('i', $receipt_id);
+        $cur->execute();
+        $cur_row = $cur->get_result()->fetch_assoc();
+        $cur->close();
+        $prev_sale_id = $cur_row && $cur_row['matched_sale_id'] ? (int)$cur_row['matched_sale_id'] : null;
+        if ($prev_sale_id !== $sales_id) {
+            if (receipts_attached_to_sale($db, $sales_id) >= SPLIT_MAX_RECEIPTS_PER_SALE) {
+                redirect_back('error', 'Sale already has the maximum of ' . SPLIT_MAX_RECEIPTS_PER_SALE . ' receipts allocated.');
+            }
+        }
+        $new_status = ($cur_row && $cur_row['currency'] !== $sale['currency'])
+                        ? 'currency_review' : 'matched';
+
         $db->begin_transaction();
         try {
             // Set matched_sale_id AND match_confidence='manual' so re-runs preserve it
             $upd = $db->prepare("
                 UPDATE receipts
-                SET matched_policy=?, matched_sale_id=?, match_status='matched', match_confidence='manual'
+                SET matched_policy=?, matched_sale_id=?, match_status=?, match_confidence='manual'
                 WHERE id=?
             ");
-            $upd->bind_param('sii', $sale['policy_number'], $sales_id, $receipt_id);
+            $upd->bind_param('sisi', $sale['policy_number'], $sales_id, $new_status, $receipt_id);
             $upd->execute();
             $upd->close();
 
@@ -224,6 +241,9 @@ try {
             $log->bind_param('iisi', $receipt_id, $sales_id, $full_reason, $uid);
             $log->execute();
             $log->close();
+
+            if ($prev_sale_id && $prev_sale_id !== $sales_id) refresh_paid_status($db, $prev_sale_id);
+            refresh_paid_status($db, $sales_id);
 
             $db->commit();
         } catch (Exception $e) {
@@ -247,6 +267,14 @@ try {
         }
         if (strlen($note) < 5) redirect_back('error', 'Exclusion note required (min 5 chars).');
 
+        // Track the prior sale link so paid_status drops the excluded receipt's contribution.
+        $cur = $db->prepare("SELECT matched_sale_id FROM receipts WHERE id=?");
+        $cur->bind_param('i', $receipt_id);
+        $cur->execute();
+        $cur_row = $cur->get_result()->fetch_assoc();
+        $cur->close();
+        $prev_sale_id = $cur_row && $cur_row['matched_sale_id'] ? (int)$cur_row['matched_sale_id'] : null;
+
         $upd = $db->prepare("
             UPDATE receipts
             SET match_status='excluded', exclude_reason=?, exclude_note=?,
@@ -256,6 +284,8 @@ try {
         $upd->bind_param('ssii', $reason, $note, $uid, $receipt_id);
         $upd->execute();
         $upd->close();
+
+        if ($prev_sale_id) refresh_paid_status($db, $prev_sale_id);
 
         audit_log($uid, 'DATA_EDIT', "Excluded receipt $receipt_id: $reason — $note");
         redirect_back('success', "Receipt excluded as '$reason'.");
@@ -304,6 +334,8 @@ try {
             }
             $upd->close();
             $log->close();
+            // Touched many sales — bulk recompute is cheaper than per-row.
+            refresh_paid_status($db);
             $db->commit();
         } catch (Exception $e) {
             $db->rollback();
@@ -384,9 +416,84 @@ try {
             if ($upd->affected_rows > 0) $count++;
         }
         $upd->close();
+        // Some of these receipts may have been allocated to sales — drop
+        // their contribution from paid_status across the board.
+        refresh_paid_status($db);
 
         audit_log($uid, 'DATA_EDIT', "Bulk excluded $count receipts: $reason — $note");
         redirect_back('success', "$count receipts excluded as '$reason'.");
+    }
+
+    // ── Currency-review approval (per sale) ─────────────────
+    // The reconciler has eyeballed the cross-currency allocation and
+    // decided it really does cover the sale (FX rate makes it work).
+    // Flip every receipt attached to this sale from currency_review →
+    // matched and let refresh_paid_status() promote the sale itself.
+    if ($action === 'currency_review_approve') {
+        $sale_id = (int)($_POST['sale_id'] ?? 0);
+        $note    = substr(trim($_POST['note'] ?? ''), 0, 500);
+        if ($sale_id <= 0) redirect_back('error', 'sale_id required.');
+
+        $db->begin_transaction();
+        try {
+            $upd = $db->prepare(
+                "UPDATE receipts
+                    SET match_status = 'matched',
+                        match_confidence = 'manual'
+                  WHERE matched_sale_id = ?
+                    AND match_status = 'currency_review'"
+            );
+            $upd->bind_param('i', $sale_id);
+            $upd->execute();
+            $touched = $upd->affected_rows;
+            $upd->close();
+
+            refresh_paid_status($db, $sale_id);
+            $db->commit();
+        } catch (Exception $e) {
+            $db->rollback();
+            redirect_back('error', 'Approve failed: ' . $e->getMessage());
+        }
+
+        audit_log($uid, 'DATA_EDIT',
+            "Currency-review approved for sale $sale_id ($touched receipt(s))" . ($note ? " — $note" : ''));
+        redirect_back('success', "Approved $touched receipt(s) for sale #$sale_id.");
+    }
+
+    // ── Currency-review rejection (per sale) ────────────────
+    // Detach every currency_review receipt from this sale, sending
+    // them back to 'pending' for re-matching with same-currency partners.
+    if ($action === 'currency_review_reject') {
+        $sale_id = (int)($_POST['sale_id'] ?? 0);
+        $note    = substr(trim($_POST['note'] ?? ''), 0, 500);
+        if ($sale_id <= 0) redirect_back('error', 'sale_id required.');
+
+        $db->begin_transaction();
+        try {
+            $upd = $db->prepare(
+                "UPDATE receipts
+                    SET matched_policy = NULL,
+                        matched_sale_id = NULL,
+                        match_status = 'pending',
+                        match_confidence = NULL
+                  WHERE matched_sale_id = ?
+                    AND match_status = 'currency_review'"
+            );
+            $upd->bind_param('i', $sale_id);
+            $upd->execute();
+            $touched = $upd->affected_rows;
+            $upd->close();
+
+            refresh_paid_status($db, $sale_id);
+            $db->commit();
+        } catch (Exception $e) {
+            $db->rollback();
+            redirect_back('error', 'Reject failed: ' . $e->getMessage());
+        }
+
+        audit_log($uid, 'DATA_EDIT',
+            "Currency-review rejected for sale $sale_id ($touched receipt(s) detached)" . ($note ? " — $note" : ''));
+        redirect_back('success', "Detached $touched receipt(s) from sale #$sale_id.");
     }
 
     redirect_back('error', 'Unknown action.');

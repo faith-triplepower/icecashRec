@@ -309,28 +309,578 @@ if (!function_exists('_ingestion_pdftotext_run')) {
 }
 
 // ════════════════════════════════════════════════════════════
-// PDF ROW READER — dual strategy
-// Tries the multi-line "statement-style" parser first (Ecobank,
-// Stanbic, etc. — transactions span 2–4 text lines) and falls
-// back to the simple single-line parser if it finds nothing.
+// PDF ROW READER — multi-strategy
+// Runs three parsers in parallel:
+//   - multi-line  : strict "S.No. + date" anchored format (Ecocash,
+//                   Stanbic, etc.). Highest precision when it works.
+//   - universal   : permissive — any line with a date+amount is a
+//                   transaction candidate, with date-less follow-up
+//                   lines treated as continuation narration. Handles
+//                   most retail bank statements (Ecobank, CBZ, FBC,
+//                   Stanbic non-Icecash format, etc.).
+//   - simple      : original single-line parser, used as a safety net.
+//
+// Whichever returns the most rows wins. Image-only PDFs (scanned
+// statements) are detected up front and rejected with a clear message
+// since pdftotext can't extract anything useful from them.
 // ════════════════════════════════════════════════════════════
 if (!function_exists('read_pdf_rows')) {
     function read_pdf_rows($filepath, $file_type) {
         $text = _ingestion_pdftotext_run($filepath);
 
-        // First try the multi-line strategy (handles Ecobank-style PDFs
-        // where each transaction spans several text lines with the amount
-        // and running balance on the first line and narration continuing
-        // below). Returns empty array if it can't find anchors.
-        $rows = _parse_pdf_multiline($text, $file_type);
-        if (count($rows) >= 5) return $rows;
+        // Image-based / scanned PDF detection. pdftotext returns close to
+        // nothing (form-feeds, page numbers) for these — no point running
+        // the row parsers, just tell the user so they can convert it.
+        $stripped = trim(preg_replace('/[\s\f]+/', ' ', $text));
+        if (strlen($stripped) < 80) {
+            throw new Exception('PDF appears to be scanned / image-based — pdftotext extracted no usable text. OCR the PDF first (e.g. with Adobe Acrobat or tesseract) and re-upload.');
+        }
 
-        // Fallback: simple one-line-per-transaction parser.
-        $simple = _parse_pdf_simple($text, $file_type);
-        if (!empty($simple)) return $simple;
-        if (!empty($rows)) return $rows; // whatever the multi-line found, even if <5
+        // Run every strategy and take the best. None of them throw
+        // mid-run — they each return whatever they could find.
+        $candidates = array(
+            'columnar'  => _parse_pdf_columnar_balance($text, $file_type),
+            'multiline' => _parse_pdf_multiline($text, $file_type),
+            'universal' => _parse_pdf_universal($text, $file_type),
+            'simple'    => _parse_pdf_simple($text, $file_type),
+        );
+        $best = array(); $best_name = '';
+        foreach ($candidates as $name => $rows) {
+            if (count($rows) > count($best)) { $best = $rows; $best_name = $name; }
+        }
+        if (!empty($best)) {
+            // Drop a breadcrumb in the PHP error log so admins can tell
+            // which strategy did the work (helps diagnose drift on new
+            // bank formats over time).
+            error_log("PDF parse: $filepath — used $best_name strategy, " . count($best) . " rows");
+            return $best;
+        }
 
-        throw new Exception('PDF parsed but no data rows detected. Verify the PDF contains a tabular statement with dates and amounts.');
+        // All strategies failed — dump pdftotext output so the operator
+        // can share it for debugging. Try project /uploads first; fall
+        // back to the system temp dir if Apache can't write there
+        // (common on Windows when the web user lacks project-folder
+        // write perms).
+        $dump_path  = null;
+        $candidates = array(
+            dirname(__DIR__) . '/uploads',
+            dirname(__DIR__) . '/exports',
+            sys_get_temp_dir(),
+        );
+        $stem = 'pdf_parse_failed_' . date('Ymd_His') . '_' . basename($filepath) . '.txt';
+        foreach ($candidates as $dir) {
+            if (!is_dir($dir)) @mkdir($dir, 0755, true);
+            if (!is_dir($dir) || !is_writable($dir)) continue;
+            $try = $dir . DIRECTORY_SEPARATOR . $stem;
+            if (@file_put_contents($try, $text) !== false) { $dump_path = $try; break; }
+        }
+        if ($dump_path) {
+            error_log('PDF parse failed — dump written to ' . $dump_path);
+            $hint = ' Diagnostic text saved to ' . $dump_path . '.';
+        } else {
+            error_log('PDF parse failed — could NOT write dump (no writable directory found)');
+            $hint = ' (Could not write diagnostic dump; check folder permissions.)';
+        }
+        throw new Exception('PDF parsed but no data rows detected. Verify the PDF contains a tabular statement with dates and amounts.' . $hint);
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+// COLUMNAR PDF PARSER
+//
+// For multi-column statements where pdftotext extracts each column
+// as its own block, NOT in transaction order. Ecobank Zimbabwe is
+// the canonical example: each page contains 8 transactions and the
+// raw text comes out as
+//
+//     [posting dates × 8]
+//     [account header info]
+//     [narrations × 8 — variable line count, separated by R-prefix]
+//     [value dates × 8]
+//     [financial summary]
+//     [S.No. × 8]
+//     [running balances × 8]
+//     [amount values — split into debit-then-credit, NOT row order]
+//
+// Pairing amounts to rows by position breaks because debits and
+// credits live in separate columns. Running balances, by contrast,
+// are ALWAYS in row order — so we compute each transaction's
+// amount and direction from balance_n − balance_{n-1} and ignore
+// the listed amounts entirely. Seeded by Opening Book Balance
+// (extracted from the first page), this delta approach reconstructs
+// every transaction exactly.
+// ════════════════════════════════════════════════════════════
+if (!function_exists('_parse_pdf_columnar_balance')) {
+    function _parse_pdf_columnar_balance($text, $file_type) {
+        // Cheap guards — only run this strategy when the layout signals
+        // are present. Other PDFs would just produce noise.
+        if (stripos($text, 'Running Balance') === false) return array();
+        if (stripos($text, 'S.No') === false && stripos($text, 'S No') === false) return array();
+
+        // Seed the running-balance chain from the statement header.
+        // Direct label-to-value regex first — works on layouts where
+        // pdftotext keeps the label on the same logical line as the value.
+        $opening = null;
+        if (preg_match('/Opening\s+Book\s+Balance\s*:?\s*(?:[A-Z]{2,4}\s*)?([\d,]+\.\d{2})/i', $text, $m)) {
+            $opening = (float)str_replace(',', '', $m[1]);
+        } elseif (preg_match('/Opening\s+(?:Available\s+)?Balance\s*:?\s*(?:[A-Z]{2,4}\s*)?([\d,]+\.\d{2})/i', $text, $m)) {
+            $opening = (float)str_replace(',', '', $m[1]);
+        }
+        // Fallback for the Ecobank-style column-block layout, where the
+        // labels and values sit in separate blocks: collect every
+        // currency-prefixed value in the summary area and pick the one
+        // that, when subtracted from the first running balance, equals
+        // an entry in the amount block. That's the opening balance by
+        // construction.
+        if ($opening === null) {
+            $opening = _columnar_solve_opening($text);
+        }
+
+        $default_currency = 'ZWG';
+        if (preg_match('/Account\s+Currency\s*:?\s*(USD|ZWG)/i', $text, $m)) {
+            $default_currency = strtoupper($m[1]);
+        }
+
+        // Split into pages — pdftotext emits a form-feed between pages
+        // by default, and the "Page X of Y" footer is also reliable.
+        $pages = preg_split('/\f/', $text);
+        if (count($pages) === 1) {
+            $pages = preg_split('/(?=\bPage\s+\d+\s+of\s+\d+\b)/', $text);
+        }
+
+        $rows = array();
+        $prev_balance = $opening;
+
+        foreach ($pages as $page) {
+            $sno_block      = _columnar_extract_sno_block($page);
+            if (count($sno_block) < 1) continue;
+            $balance_block  = _columnar_extract_balance_block($page);
+            if (count($balance_block) < count($sno_block)) continue;
+
+            $count = count($sno_block);
+            $balances   = array_slice($balance_block, 0, $count);
+            $narrations = _columnar_extract_narrations($page, $count);
+            $dates      = _columnar_extract_dates($page, $count);
+
+            for ($i = 0; $i < $count; $i++) {
+                $bal = (float)$balances[$i];
+                $is_credit = true;
+                $amount    = 0.0;
+
+                if ($prev_balance !== null) {
+                    $delta = $bal - $prev_balance;
+                    $amount = abs($delta);
+                    $is_credit = $delta > 0;
+                }
+                $prev_balance = $bal;
+
+                // amount=0 = drop from receipts, mirrors existing parsers
+                $amount_val = $is_credit ? $amount : 0;
+                $date       = isset($dates[$i])      ? $dates[$i]      : '';
+                $narration  = isset($narrations[$i]) ? $narrations[$i] : '';
+                $ref        = _columnar_extract_ref($narration);
+                $nar_short  = substr(trim(preg_replace('/\s+/', ' ', $narration)), 0, 200);
+
+                if ($file_type === 'Sales') {
+                    $rows[] = array(
+                        'policy_number'  => $ref,
+                        'txn_date'       => $date,
+                        'agent'          => $nar_short,
+                        'product'        => '',
+                        'payment_method' => '',
+                        'amount'         => $amount_val,
+                        'currency'       => $default_currency,
+                    );
+                } else {
+                    $rows[] = array(
+                        'reference_no' => $ref,
+                        'txn_date'     => $date,
+                        'terminal_id'  => '',
+                        'channel'      => '',
+                        'source_name'  => $nar_short,
+                        'amount'       => $amount_val,
+                        'currency'     => $default_currency,
+                    );
+                }
+            }
+        }
+
+        return $rows;
+    }
+}
+
+// Find the S.No. block: a run of consecutive integer-only lines
+// (the longest such run on the page is the S.No. column).
+if (!function_exists('_columnar_extract_sno_block')) {
+    function _columnar_extract_sno_block($page) {
+        $lines = preg_split('/\r?\n/', $page);
+        $best = array(); $cur = array();
+        foreach ($lines as $raw) {
+            $t = trim($raw);
+            if (preg_match('/^\d{1,4}$/', $t)) {
+                $cur[] = (int)$t;
+            } else {
+                if (count($cur) > count($best)) $best = $cur;
+                $cur = array();
+            }
+        }
+        if (count($cur) > count($best)) $best = $cur;
+        // Sanity: must be at least 1 entry. Most pages have 7–9.
+        return (count($best) >= 1 && count($best) <= 60) ? $best : array();
+    }
+}
+
+// Find running-balance block: the longest run of consecutive lines
+// that look like "12,345.67" (or "1.23") with NO currency prefix.
+// Currency-prefixed amounts (ZWG 1,234.56) belong to the debit/credit
+// column block which we explicitly want to skip.
+if (!function_exists('_columnar_extract_balance_block')) {
+    function _columnar_extract_balance_block($page) {
+        $lines = preg_split('/\r?\n/', $page);
+        $best = array(); $cur = array();
+        foreach ($lines as $raw) {
+            $t = trim($raw);
+            if ($t === '') {
+                if (count($cur) > count($best)) $best = $cur;
+                $cur = array();
+                continue;
+            }
+            // Accept "1,234.56", "1234.56", "1.23". Reject anything with letters.
+            if (preg_match('/^[\d]{1,3}(?:,\d{3})*\.\d{2}$|^\d+\.\d{2}$/', $t)) {
+                $cur[] = (float)str_replace(',', '', $t);
+            } else {
+                if (count($cur) > count($best)) $best = $cur;
+                $cur = array();
+            }
+        }
+        if (count($cur) > count($best)) $best = $cur;
+        return $best;
+    }
+}
+
+// Find $count posting dates per page. Dates appear in two contiguous
+// runs on each page (posting dates + value dates); both have the same
+// transactions in the same order, so either works. We take the first
+// run with at least $count entries.
+if (!function_exists('_columnar_extract_dates')) {
+    function _columnar_extract_dates($page, $count) {
+        $lines = preg_split('/\r?\n/', $page);
+        $runs  = array();
+        $cur   = array();
+        foreach ($lines as $raw) {
+            $t = trim($raw);
+            if (preg_match('/^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$/', $t, $m)) {
+                $cur[] = $m[1];
+            } else {
+                if (!empty($cur)) $runs[] = $cur;
+                $cur = array();
+            }
+        }
+        if (!empty($cur)) $runs[] = $cur;
+
+        // Prefer a run of exactly $count; otherwise the first run with >= $count.
+        foreach ($runs as $r) if (count($r) === $count) return $r;
+        foreach ($runs as $r) if (count($r) >= $count)  return array_slice($r, 0, $count);
+        return array_fill(0, $count, '');
+    }
+}
+
+// Split the narration block into $count parts. Each transaction's
+// narration starts with an R-prefix reference (R30xxx, R02xxx, R05xxx,
+// R300i…, etc.) at the very beginning of a line. Lines between two
+// such markers belong to the earlier transaction.
+if (!function_exists('_columnar_extract_narrations')) {
+    function _columnar_extract_narrations($page, $count) {
+        $lines = preg_split('/\r?\n/', $page);
+
+        // Locate the narration zone — between "Posting Date Narration"
+        // header and the next pure-date block (the value dates).
+        $start = -1; $end = count($lines);
+        foreach ($lines as $i => $raw) {
+            $t = trim($raw);
+            if ($start < 0 && stripos($t, 'Posting Date') !== false && stripos($t, 'Narration') !== false) {
+                $start = $i + 1;
+                continue;
+            }
+            if ($start >= 0 && preg_match('/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$/', $t)) {
+                $end = $i;
+                break;
+            }
+        }
+        if ($start < 0) return array_fill(0, $count, '');
+
+        $narrations = array();
+        $current    = '';
+        for ($i = $start; $i < $end; $i++) {
+            $line = trim($lines[$i]);
+            if ($line === '') continue;
+            // Start of a new transaction reference: R<digits><letters>...
+            if (preg_match('/^R\d+[A-Za-z0-9]+\d+/i', $line) || preg_match('/^R\d+RTT[FI]\d+/i', $line)) {
+                if ($current !== '') $narrations[] = $current;
+                $current = $line;
+            } else {
+                $current .= ($current === '' ? '' : ' ') . $line;
+            }
+        }
+        if ($current !== '') $narrations[] = $current;
+
+        // Pad/trim to $count
+        while (count($narrations) < $count) $narrations[] = '';
+        return array_slice($narrations, 0, $count);
+    }
+}
+
+// Solve for the opening balance when the financial-summary labels are
+// in a different text block than their values (Ecobank's column layout).
+//
+// Strategy: collect every currency-prefixed decimal in the area before
+// the first running-balance block, plus the first running balance and
+// every entry in the amount block. The opening balance O satisfies
+//   first_balance - O = some_amount_in_block
+// because O + first_amount = first_balance by definition. The candidate
+// from the summary that satisfies this equation IS the opening balance.
+if (!function_exists('_columnar_solve_opening')) {
+    function _columnar_solve_opening($text) {
+        // Take only the first page's worth of text for this — opening
+        // balance is page-1-only and later pages chain off it.
+        $first_page = preg_split('/\f/', $text, 2)[0];
+        if (!$first_page) $first_page = $text;
+
+        // First running-balance block on the first page.
+        $balances = _columnar_extract_balance_block($first_page);
+        if (empty($balances)) return null;
+        $first_bal = (float)$balances[0];
+
+        // All currency-prefixed amounts on the first page (these include
+        // both the financial-summary values and the per-row amount block).
+        if (!preg_match_all('/(?:ZWG|USD|Z\$|\$)\s*([\d,]+\.\d{2})/i', $first_page, $m)) return null;
+        $vals = array();
+        foreach ($m[1] as $v) $vals[] = (float)str_replace(',', '', $v);
+
+        // Build a hash-set of value strings for O(1) membership tests.
+        $vset = array();
+        foreach ($vals as $v) $vset[(string)round($v, 2)] = true;
+
+        // For each candidate O, check whether (first_bal - O) is in the
+        // amount set. The first match is the opening balance.
+        foreach ($vals as $cand) {
+            $derived = round($first_bal - $cand, 2);
+            if ($derived <= 0) continue;
+            if (isset($vset[(string)$derived])) return $cand;
+        }
+        return null;
+    }
+}
+
+// Pull the canonical reference token out of a narration. Preference:
+//   1. R30xxx / R02xxx / R05xxx (Ecobank's transaction reference)
+//   2. RRN nnnnnnnnn
+//   3. Long numeric ID (10+ digits — the cross-bank reference)
+if (!function_exists('_columnar_extract_ref')) {
+    function _columnar_extract_ref($narration) {
+        // Ecobank reference shapes seen so far:
+        //   R30uctp260580003   (R + 2-digit code + lowercase + digits)
+        //   R30RTTF260630226   (R + 2-digit + uppercase RTTF + digits)
+        //   R300i9m260630082   (R + 3-digit + alphanumeric + digits)
+        //   R30ZEXA260700045   / R30INTL260840862  / R05PAMCZWGL00001
+        // One permissive pattern catches all of them.
+        if (preg_match('/\b(R\d{1,3}[A-Za-z][A-Za-z0-9]{2,}\d{4,})\b/', $narration, $m)) {
+            return $m[1];
+        }
+        if (preg_match('/RRN\s*(\d{6,})/i', $narration, $m)) {
+            return 'RRN' . $m[1];
+        }
+        if (preg_match('/\b(\d{10,})\b/', $narration, $m)) {
+            return $m[1];
+        }
+        return '';
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+// UNIVERSAL PDF PARSER
+//
+// The other two parsers expect a specific column layout. This one
+// just walks lines looking for a date plus at least one decimal
+// amount, treating date-less lines that follow as continuation
+// narration for the previous transaction. That covers the vast
+// majority of bank statement layouts without per-bank tuning.
+//
+// Heuristics:
+//   - date can appear anywhere on the line, in any common format
+//   - if multiple decimal amounts are on the same line, the LAST
+//     one is treated as the running balance and the LARGEST of
+//     the remainder is the transaction amount (typical layout:
+//     "<date> <desc> <amount> <balance>")
+//   - currency-prefixed amounts (ZWG/USD/Z$/$) win over plain
+//     numbers when both are present
+//   - lines containing TOTAL, BALANCE, OPENING, CLOSING, BROUGHT
+//     FORWARD, etc. are skipped — they look like transactions but
+//     aren't
+//   - credit vs debit is inferred from the running-balance delta
+//     when balances are present; otherwise defaults to credit and
+//     the existing direction-resolver elsewhere handles it
+// ════════════════════════════════════════════════════════════
+if (!function_exists('_parse_pdf_universal')) {
+    function _parse_pdf_universal($text, $file_type) {
+        $lines = preg_split('/\r?\n/', $text);
+        $rows  = array();
+
+        $date_re = '#\b(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})\b#';
+        // Currency-prefixed amount (ZWG / USD / Z$ / $)
+        $ccy_amt_re = '#(ZWG|USD|Z\$|\$)\s*([\d,]+\.\d{2})#i';
+        // Plain decimal amount — requires at least 2 decimal places to
+        // avoid catching dates like "31.03" or page numbers.
+        $amt_re = '#(?<![\w.])([\d]{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})(?![\w])#';
+        // Reference: long-ish alphanumeric or 8+ digit ID
+        $ref_re = '#\b([A-Z]{2,}[A-Z0-9\-/]{2,}\d+|RRN\s*\d{6,}|\d{8,})\b#i';
+
+        // Substring keywords on a line that disqualify it as a transaction
+        // even if it has date+amount (e.g. "Opening Balance 2024-03-01 1,234.56").
+        $skip_substrings = array(
+            'TOTAL DEPOSIT','TOTAL WITHDRAWAL','TOTAL CREDITS','TOTAL DEBITS',
+            'OPENING BALANCE','CLOSING BALANCE','BROUGHT FORWARD','CARRIED FORWARD',
+            'STATEMENT PERIOD','STATEMENT OF ACCOUNT','APPLIED FILTERS',
+            'PAGE ', 'CONTINUED', '---END', 'PLEASE EXAMINE', 'THIS IS UNAUDITED',
+            'COMPANY NAME','COMPANY ADDRESS','ACCOUNT CURRENCY','ACCOUNT NAME',
+            'FINANCIAL INSTITUTION', 'COLUMN NAME',
+        );
+
+        $current      = null;  // in-progress txn
+        $prev_balance = null;
+
+        foreach ($lines as $raw) {
+            $line = rtrim($raw);
+            if (trim($line) === '') continue;
+
+            $upper = strtoupper($line);
+            $skip = false;
+            foreach ($skip_substrings as $kw) {
+                if (strpos($upper, $kw) !== false) { $skip = true; break; }
+            }
+            if ($skip) continue;
+
+            $has_date = (bool)preg_match($date_re, $line, $dm);
+
+            // Pull all candidate amounts off the line.
+            $ccy_amounts  = array();
+            if (preg_match_all($ccy_amt_re, $line, $cm)) {
+                foreach ($cm[2] as $i => $val) {
+                    $ccy_amounts[] = array(
+                        'ccy' => strtoupper($cm[1][$i]) === 'Z$' ? 'ZWG' : (strtoupper($cm[1][$i]) === '$' ? 'USD' : strtoupper($cm[1][$i])),
+                        'val' => (float)str_replace(',', '', $val),
+                    );
+                }
+            }
+            $plain_amounts = array();
+            if (preg_match_all($amt_re, $line, $am)) {
+                foreach ($am[1] as $val) {
+                    $f = (float)str_replace(',', '', $val);
+                    if ($f > 0) $plain_amounts[] = $f;
+                }
+            }
+
+            $is_anchor = $has_date && (count($ccy_amounts) > 0 || count($plain_amounts) > 0);
+
+            if ($is_anchor) {
+                // Flush any open txn before starting the next.
+                if ($current) {
+                    $rows[] = _finalize_universal_txn($current, $prev_balance, $file_type);
+                    if ($current['balance'] !== null) $prev_balance = $current['balance'];
+                }
+
+                // Pick transaction amount + currency.
+                $amount = 0; $currency = '';
+                if (!empty($ccy_amounts)) {
+                    $amount   = $ccy_amounts[0]['val'];
+                    $currency = $ccy_amounts[0]['ccy'];
+                } elseif (count($plain_amounts) >= 2) {
+                    // Last is balance; pick the largest of the rest as the amount.
+                    $without_last = array_slice($plain_amounts, 0, -1);
+                    $amount = max($without_last);
+                } else {
+                    $amount = $plain_amounts[0];
+                }
+                if ($currency === '') $currency = 'ZWG';
+
+                $balance = !empty($plain_amounts) ? end($plain_amounts) : null;
+
+                // Strip the structured tokens and use the remainder as narration.
+                $clean = preg_replace($date_re, ' ', $line);
+                $clean = preg_replace($ccy_amt_re, ' ', $clean);
+                $clean = preg_replace($amt_re, ' ', $clean);
+                $ref = '';
+                if (preg_match($ref_re, $clean, $rm)) $ref = $rm[1];
+
+                $current = array(
+                    'date'      => $dm[1],
+                    'amount'    => $amount,
+                    'currency'  => $currency,
+                    'balance'   => $balance,
+                    'ref'       => $ref,
+                    'narration' => trim(preg_replace('/\s+/', ' ', $clean)),
+                );
+                continue;
+            }
+
+            // Continuation line: add to the current txn's narration.
+            if ($current) {
+                $clean = trim(preg_replace('/\s+/', ' ', $line));
+                if (empty($current['ref']) && preg_match($ref_re, $clean, $rm)) {
+                    $current['ref'] = $rm[1];
+                }
+                if (strlen($current['narration']) < 400) {
+                    $current['narration'] .= ' ' . $clean;
+                }
+            }
+        }
+
+        if ($current) {
+            $rows[] = _finalize_universal_txn($current, $prev_balance, $file_type);
+        }
+
+        return $rows;
+    }
+}
+
+if (!function_exists('_finalize_universal_txn')) {
+    function _finalize_universal_txn($txn, $prev_balance, $file_type) {
+        $amount = (float)$txn['amount'];
+        $is_credit = true;
+
+        // Balance delta says debit if balance dropped by ~the amount.
+        if ($prev_balance !== null && $txn['balance'] !== null && $amount > 0.01) {
+            $delta = (float)$txn['balance'] - (float)$prev_balance;
+            if (abs($delta + $amount) < 0.05 && abs($delta - $amount) >= 0.05) {
+                $is_credit = false;
+            }
+        }
+
+        $currency = $txn['currency'] ?: 'ZWG';
+        if ($currency !== 'ZWG' && $currency !== 'USD') $currency = 'ZWG';
+        $amount_val = $is_credit ? $amount : 0;
+        $nar = substr(trim($txn['narration']), 0, 200);
+
+        if ($file_type === 'Sales') {
+            return array(
+                'policy_number'  => $txn['ref'],
+                'txn_date'       => $txn['date'],
+                'agent'          => $nar,
+                'product'        => '',
+                'payment_method' => '',
+                'amount'         => $amount_val,
+                'currency'       => $currency,
+            );
+        }
+        return array(
+            'reference_no' => $txn['ref'],
+            'txn_date'     => $txn['date'],
+            'terminal_id'  => '',
+            'channel'      => '',
+            'source_name'  => $nar,
+            'amount'       => $amount_val,
+            'currency'     => $currency,
+        );
     }
 }
 
