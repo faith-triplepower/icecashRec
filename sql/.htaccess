@@ -1,0 +1,11 @@
+# SQL files contain schema, seed data, and may include password hashes.
+# Block direct web access — the application loads them server-side only.
+
+# Apache 2.4+
+Require all denied
+
+# Apache 2.2 fallback
+<IfModule !mod_authz_core.c>
+    Order deny,allow
+    Deny from all
+</IfModule>

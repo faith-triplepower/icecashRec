@@ -50,15 +50,27 @@ if (!isset($_GET['date_from']) && !isset($_GET['date_to'])) {
     $f_to   = $_GET['date_to']   ?? date('Y-m-d');
 }
 
-$f_product  = $_GET['product']  ?? '';
-$f_agent    = (int)($_GET['agent_id'] ?? 0);
-$f_currency = $_GET['currency']  ?? '';
+// Round-trip dates so a malformed ?date_from=anything reverts to a
+// safe boundary. After this $f_from / $f_to are 'YYYY-MM-DD' literals.
+$ft_from = strtotime($f_from); $ft_to = strtotime($f_to);
+$f_from  = $ft_from ? date('Y-m-d', $ft_from) : date('Y-m-01');
+$f_to    = $ft_to   ? date('Y-m-d', $ft_to)   : date('Y-m-d');
 
-// Build WHERE
-$where  = ["s.txn_date BETWEEN '" . $db->real_escape_string($f_from) . "' AND '" . $db->real_escape_string($f_to) . "'"];
-if ($f_product)  $where[] = "s.product = '" . $db->real_escape_string($f_product) . "'";
+// Whitelist filter values against the table's ENUMs so the SQL below
+// can never receive an arbitrary GET string.
+$VALID_PRODUCTS   = array('Zinara','PPA');
+$VALID_CURRENCIES = array('ZWG','USD');
+
+$f_product  = in_array($_GET['product']  ?? '', $VALID_PRODUCTS,   true) ? $_GET['product']  : '';
+$f_agent    = (int)($_GET['agent_id'] ?? 0);
+$f_currency = in_array($_GET['currency'] ?? '', $VALID_CURRENCIES, true) ? $_GET['currency'] : '';
+
+// All values feeding $w are whitelisted ENUMs, sanitised dates, or
+// (int) casts — safe to interpolate.
+$where  = ["s.txn_date BETWEEN '$f_from' AND '$f_to'"];
+if ($f_product)  $where[] = "s.product = '$f_product'";
 if ($f_agent)    $where[] = "s.agent_id = $f_agent";
-if ($f_currency) $where[] = "s.currency = '" . $db->real_escape_string($f_currency) . "'";
+if ($f_currency) $where[] = "s.currency = '$f_currency'";
 $w = implode(' AND ', $where);
 // Scope Uploaders to their own rows
 if ($uploader_scope_sql) $w .= $uploader_scope_sql;

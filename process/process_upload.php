@@ -175,8 +175,12 @@ function process_one_upload($db, $file, $file_type, $report_type, $source_name, 
     if (!in_array($ext, array('csv', 'xlsx', 'xls', 'pdf'))) {
         return array('status' => 'rejected', 'record_count' => 0, 'validation' => 'unsupported extension');
     }
-    if ($file['size'] > 20 * 1024 * 1024) {
-        return array('status' => 'rejected', 'record_count' => 0, 'validation' => 'exceeds 20 MB limit');
+    // 50 MB per-file cap, enforced HERE rather than only via .htaccess
+    // / php.ini. Apache's mod_php directives in .htaccess are silently
+    // ignored when PHP runs under PHP-FPM, so the cap has to live in
+    // application code to be portable across deployments.
+    if ($file['size'] > 50 * 1024 * 1024) {
+        return array('status' => 'rejected', 'record_count' => 0, 'validation' => 'exceeds 50 MB per-file limit');
     }
 
     // Fix 5: MIME validation — verify actual content, not just extension.

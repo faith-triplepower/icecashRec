@@ -1,4 +1,11 @@
-# Upload limits for multi-file support
+# NOTE: php_value directives only apply when Apache uses mod_php.
+# On PHP-FPM (most modern shared hosts) these are SILENTLY IGNORED
+# and the limits revert to whatever php.ini specifies. Anything that
+# absolutely needs enforcement is duplicated in application code:
+#   - per-file upload size cap → process/process_upload.php (50 MB)
+#   - reconciliation deadline   → core/matcher.php (uses ini_get('max_execution_time'))
+# If you change a number here, change the matching one in code too.
+
 php_value upload_max_filesize 50M
 php_value post_max_size 100M
 php_value max_file_uploads 20

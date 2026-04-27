@@ -25,6 +25,31 @@ require_once __DIR__ . '/db.php';
 
 // ── Helpers ─────────────────────────────────────────────────
 
+// Centralised audit-log writer. Every state change in the system
+// MUST go through this function — direct INSERT INTO audit_log calls
+// scattered through process/* drift out of sync with the ENUM and
+// silently lose the most security-relevant rows (deletions, flags).
+//
+// $action MUST be one of the values in the audit_log.action_type ENUM:
+//   LOGIN, LOGOUT, FILE_UPLOAD, FLAG_UPLOAD, DELETE_UPLOAD,
+//   RECON_RUN, DATA_EDIT, REPORT_EXPORT, USER_MGMT
+function audit_log_entry($user_id, $action, $details, $result = 'success'): void {
+    $db = get_db();
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+    $stmt = $db->prepare(
+        "INSERT INTO audit_log (user_id, action_type, detail, ip_address, result, created_at)
+         VALUES (?, ?, ?, ?, ?, NOW())"
+    );
+    if (!$stmt) {
+        // Don't break the caller — but do leave a server-log breadcrumb.
+        error_log("audit_log_entry: prepare failed: " . $db->error);
+        return;
+    }
+    $stmt->bind_param('issss', $user_id, $action, $details, $ip, $result);
+    $stmt->execute();
+    $stmt->close();
+}
+
 function is_logged_in(): bool {
     return isset($_SESSION['user']['id']) && is_numeric($_SESSION['user']['id']);
 }
@@ -149,16 +174,11 @@ function logout(): void {
 
 // ── Audit logging ────────────────────────────────────────────
 
+// Backwards-compatible alias for callers that already use audit_log().
+// Both names route to the canonical writer above so there's only one
+// INSERT into audit_log in the whole codebase.
 function audit_log(int $user_id, string $action, string $detail, string $result = 'success'): void {
-    $db     = get_db();
-    $ip     = $_SERVER['REMOTE_ADDR'] ?? '';
-    $stmt   = $db->prepare(
-        "INSERT INTO audit_log (user_id, action_type, detail, ip_address, result)
-         VALUES (?, ?, ?, ?, ?)"
-    );
-    $stmt->bind_param('issss', $user_id, $action, $detail, $ip, $result);
-    $stmt->execute();
-    $stmt->close();
+    audit_log_entry($user_id, $action, $detail, $result);
 }
 
 function audit_login_failed(string $username): void {

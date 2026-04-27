@@ -49,19 +49,37 @@ if (!isset($_GET['date_from']) && !isset($_GET['date_to'])) {
     $f_to   = $_GET['date_to']   ?? date('Y-m-d');
 }
 
-$f_source    = $_GET['source']       ?? '';
-$f_status    = $_GET['match_status'] ?? '';
-$f_direction = $_GET['direction']    ?? 'credit';   // credit | debit | all
+// Round-trip dates through strtotime/date so anything that isn't a real
+// date falls back to a safe default. After this, $f_from/$f_to are
+// guaranteed to be 'YYYY-MM-DD' regardless of GET input.
+$ft_from = strtotime($f_from); $ft_to = strtotime($f_to);
+$f_from  = $ft_from ? date('Y-m-d', $ft_from) : date('Y-m-01');
+$f_to    = $ft_to   ? date('Y-m-d', $ft_to)   : date('Y-m-d');
+
+// Whitelist filter values against the table's ENUMs so the SQL below
+// never sees an arbitrary GET string. Anything not in the list reverts
+// to no filter (empty), which keeps behaviour predictable when someone
+// crafts an unexpected URL.
+$VALID_CHANNELS    = array('Bank POS','iPOS','EcoCash','Zimswitch','Broker');
+$VALID_STATUSES    = array('matched','pending','variance','excluded','partial','currency_review');
+$VALID_DIRECTIONS  = array('credit','debit','all');
+
+$f_source    = in_array($_GET['source']       ?? '', $VALID_CHANNELS,   true) ? $_GET['source']       : '';
+$f_status    = in_array($_GET['match_status'] ?? '', $VALID_STATUSES,   true) ? $_GET['match_status'] : '';
+$f_direction = in_array($_GET['direction']    ?? '', $VALID_DIRECTIONS, true) ? $_GET['direction']    : 'credit';
+
 $page        = max(1, (int)($_GET['page'] ?? 1));
 $per_page    = 10;
 $offset      = ($page - 1) * $per_page;
 
-$where = ["txn_date BETWEEN '" . $db->real_escape_string($f_from) . "' AND '" . $db->real_escape_string($f_to) . "'"];
+// All values feeding $w are now either round-tripped dates or
+// whitelisted ENUM values, so the inline SQL below is safe.
+$where = ["txn_date BETWEEN '$f_from' AND '$f_to'"];
 if ($f_direction === 'credit' || $f_direction === 'debit') {
     $where[] = "direction = '$f_direction'";
 }
-if ($f_source) $where[] = "channel = '" . $db->real_escape_string($f_source) . "'";
-if ($f_status) $where[] = "match_status = '" . $db->real_escape_string($f_status) . "'";
+if ($f_source) $where[] = "channel = '$f_source'";
+if ($f_status) $where[] = "match_status = '$f_status'";
 $w = implode(' AND ', $where);
 // Append the uploader scope OUTSIDE of the implode so it's always the
 // last condition regardless of which optional filters the user picks.

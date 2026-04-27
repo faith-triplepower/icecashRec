@@ -61,17 +61,9 @@ function set_progress($db, $run_id, $pct, $msg) {
     $stmt->close();
 }
 
-function audit_log_entry($user_id, $action, $details, $result = 'success') {
-    global $db;
-    $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '';
-    $stmt = $db->prepare(
-        "INSERT INTO audit_log (user_id, action_type, detail, ip_address, result, created_at)
-         VALUES (?, ?, ?, ?, ?, NOW())"
-    );
-    $stmt->bind_param('issss', $user_id, $action, $details, $ip, $result);
-    $stmt->execute();
-    $stmt->close();
-}
+// audit_log_entry() now lives in core/auth.php so every state-changing
+// endpoint goes through the same writer (and can't drift out of sync
+// with the action_type ENUM).
 
 function normalize_ymd($d) {
     $ts = strtotime($d);

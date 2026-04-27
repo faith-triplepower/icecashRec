@@ -8,6 +8,7 @@ Built with **PHP 7.2**, **MySQL/MariaDB**, and **Bootstrap 3**. Runs on **XAMPP*
 
 ## What It Does
 
+
 Every month, Zimnat collects insurance premiums through Icecash terminals, bank POS devices, EcoCash, and brokers. This system:
 
 1. **Ingests** sales reports (Icecash, Bordeaux, Zinara) and receipt files (bank statements, EcoCash exports)
@@ -31,15 +32,21 @@ Every month, Zimnat collects insurance premiums through Icecash terminals, bank 
 # 1. Place the project folder
 cp -r icecashRec/ C:/xampp/htdocs/icecashRec/
 
-# 2. Create the database
-mysql -u root < sql/icecash_db.sql
-mysql -u root icecash_recon < sql/consolidated_fix.sql
+# 2. Create the database (single bundled installer — schema + seed + triggers)
+mysql -u root < sql/install.sql
 
 # 3. Start Apache + MySQL in XAMPP Control Panel
 
 # 4. Open in browser
 http://localhost/icecashRec/pages/login.php
 ```
+
+> Existing installs upgrading from older revisions: run the per-feature
+> migrations in `sql/` (`add_direction_column.sql`,
+> `add_split_payments.sql`, `add_upload_flag_columns.sql`,
+> `extend_audit_action_types.sql`, `relax_sale_uniqueness.sql`,
+> `force_smart_engine.sql`) instead of re-running `install.sql`.
+> Admins can run them from the in-app Database page (`/admin/db_admin.php`).
 
 ### Demo Accounts
 
@@ -74,9 +81,10 @@ http://localhost/icecashRec/pages/login.php
 - Sees dashboard charts and trends
 
 ### Admin
-- Everything Manager can do (except escalations)
+- Everything Manager can do (including escalations — Admin can break a
+  deadlock when no Manager is available)
 - Organization settings, session timeout, password policies
-- System admin panel, database info
+- System admin panel, database admin page (`/admin/db_admin.php`)
 - Create/delete admin accounts
 
 ---
@@ -152,6 +160,9 @@ Browser
 - MIME validation on uploads
 - Audit log immutability (DB triggers block UPDATE/DELETE)
 - DB credentials externalized to config.php
+- `.htaccess` files in `sql/`, `scripts/`, `backups/`, `exports/` deny
+  direct web access (defense-in-depth — backups should also live
+  outside the web root; see `scripts/backup_db.bat`)
 
 ### UX
 - Global search across sales, receipts, agents, statements, escalations

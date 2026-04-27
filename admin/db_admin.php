@@ -40,15 +40,11 @@ function is_destructive($name, $patterns) {
     return false;
 }
 
+// Thin wrapper so existing call sites keep working — the actual write
+// goes through audit_log_entry() in core/auth.php so the action_type
+// ENUM is enforced in one place.
 function log_admin_action($db, $uid, $detail, $result = 'success') {
-    $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '';
-    $stmt = $db->prepare(
-        "INSERT INTO audit_log (user_id, action_type, detail, ip_address, result, created_at)
-         VALUES (?, 'DATA_EDIT', ?, ?, ?, NOW())"
-    );
-    $stmt->bind_param('isss', $uid, $detail, $ip, $result);
-    $stmt->execute();
-    $stmt->close();
+    audit_log_entry($uid, 'DATA_EDIT', $detail, $result);
 }
 
 // ── Run a SQL file ──────────────────────────────────────────

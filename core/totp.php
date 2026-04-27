@@ -8,11 +8,15 @@
 // Part of IceCashRec — Zimnat General Insurance
 // ============================================================
 
-function totp_generate_secret($length = 20) {
-    $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function totp_generate_secret() {
+    // RFC 6238 recommends a 20-byte (160-bit) secret, which yields a
+    // 32-character base32 representation. Bound the loop on the actual
+    // byte string length so the function can't read past the buffer if
+    // the byte source ever changes.
+    $chars  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $bytes  = random_bytes(20);
     $secret = '';
-    $bytes = random_bytes($length);
-    for ($i = 0; $i < $length; $i++) {
+    for ($i = 0, $n = strlen($bytes); $i < $n; $i++) {
         $secret .= $chars[ord($bytes[$i]) % 32];
     }
     return $secret;

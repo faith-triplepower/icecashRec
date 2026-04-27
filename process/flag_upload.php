@@ -68,15 +68,8 @@ $upd->execute();
 $upd->close();
 
 // ── Audit log ─────────────────────────────────────────────
-$detail = "Flagged upload #{$upload_id} ({$file['filename']}) — {$reason}";
-$ip = $_SERVER['REMOTE_ADDR'] ?? '';
-$a = $db->prepare("
-    INSERT INTO audit_log (user_id, action_type, detail, ip_address, result, created_at)
-    VALUES (?, 'FLAG_UPLOAD', ?, ?, 'success', NOW())
-");
-$a->bind_param('iss', $uid, $detail, $ip);
-$a->execute();
-$a->close();
+audit_log_entry($uid, 'FLAG_UPLOAD',
+    "Flagged upload #{$upload_id} ({$file['filename']}) — {$reason}");
 
 // ── Notify the uploader by email ──────────────────────────
 $reason_labels = array(

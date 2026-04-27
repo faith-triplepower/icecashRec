@@ -1,10 +1,25 @@
--- IceRecon Database Schema
+-- ============================================================
+-- install.sql — Single-file installer for IceCashRec
+--
+-- Runs on a fresh MySQL/MariaDB instance and produces the full
+-- schema + seed data + audit triggers ready for a first login.
+-- Bundles every column and table that's been added incrementally
+-- via the per-feature migration files in this folder, so a fresh
+-- install never has to chase migrations.
+--
+-- Usage:
+--   mysql -u root < sql/install.sql
+--
+-- Idempotent in spirit: CREATE DATABASE IF NOT EXISTS, IF NOT EXISTS
+-- on tables, INSERT IGNORE on seed rows. Safe to re-run.
+-- ============================================================
+
 CREATE DATABASE IF NOT EXISTS icecash_recon
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE icecash_recon;
 
 -- ── 1. USERS ────────────────────────────────────────────────
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id            INT AUTO_INCREMENT PRIMARY KEY,
     username      VARCHAR(50)  NOT NULL UNIQUE,
     full_name     VARCHAR(100) NOT NULL,
@@ -17,8 +32,7 @@ CREATE TABLE users (
     created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- NOTE: Replace these hashes with real ones from password_hash('yourpassword', PASSWORD_DEFAULT)
-INSERT INTO users (username, full_name, email, password_hash, role, initials) VALUES
+INSERT IGNORE INTO users (username, full_name, email, password_hash, role, initials) VALUES
 ('farai.choto', 'Farai Choto', 'farai.choto@zimnat.co.zw',
  '$2y$10$l9wZuG2/xYBhnoT3KSINkeu/FjqC4hMl6jetzeBNSNkHiqZFHfEuy', 'Manager',    'FC'),
 ('tendai.moyo', 'Tendai Moyo', 'tendai.moyo@zimnat.co.zw',
@@ -27,10 +41,14 @@ INSERT INTO users (username, full_name, email, password_hash, role, initials) VA
  '$2y$10$.cL1CzNV7O1m7bY5/4vpSeQZmu/FRRWBujU4TL.yO4ValXvMjA2jC', 'Uploader',   'UU'),
 ('sys.admin',   'System Administrator', 'admin@zimnat.co.zw',
  '$2y$10$Kxuqmf/cHkzOfAcebg.C.u2kdALWKTDn061NiOaVib5MmbO0U1MRW', 'Admin',      'SA');
--- Passwords: farai.choto=manager2025 | tendai.moyo=recon2025 | upload.user=upload2025 | sys.admin=admin2025
+-- Default passwords (change on first login):
+--   farai.choto = manager2025
+--   tendai.moyo = recon2025
+--   upload.user = upload2025
+--   sys.admin   = admin2025
 
 -- ── 2. AGENTS ───────────────────────────────────────────────
-CREATE TABLE agents (
+CREATE TABLE IF NOT EXISTS agents (
     id          INT AUTO_INCREMENT PRIMARY KEY,
     agent_code  VARCHAR(20)  NOT NULL UNIQUE,
     agent_name  VARCHAR(100) NOT NULL,
@@ -41,7 +59,7 @@ CREATE TABLE agents (
     created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO agents (agent_code, agent_name, agent_type, region, currency) VALUES
+INSERT IGNORE INTO agents (agent_code, agent_name, agent_type, region, currency) VALUES
 ('AGT-001', 'Harare Central',  'iPOS',         'Harare',      'ZWG/USD'),
 ('AGT-002', 'Bulawayo Zone A', 'POS Terminal', 'Bulawayo',    'ZWG'),
 ('AGT-003', 'Mutare Agency',   'Broker',       'Manicaland',  'ZWG'),
@@ -52,7 +70,7 @@ INSERT INTO agents (agent_code, agent_name, agent_type, region, currency) VALUES
 ('AGT-008', 'Masvingo Broker', 'Broker',       'Masvingo',    'ZWG');
 
 -- ── 3a. BANKS ──────────────────────────────────────────────
-CREATE TABLE banks (
+CREATE TABLE IF NOT EXISTS banks (
     id         INT AUTO_INCREMENT PRIMARY KEY,
     bank_name  VARCHAR(100) NOT NULL UNIQUE,
     bank_code  VARCHAR(20)  NULL,
@@ -60,13 +78,13 @@ CREATE TABLE banks (
     created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO banks (bank_name, bank_code) VALUES
+INSERT IGNORE INTO banks (bank_name, bank_code) VALUES
   ('CBZ Bank', 'CBZ'),
   ('Stanbic',  'STAN'),
   ('FBC Bank', 'FBC');
 
 -- ── 3. POS TERMINALS ────────────────────────────────────────
-CREATE TABLE pos_terminals (
+CREATE TABLE IF NOT EXISTS pos_terminals (
     id            INT AUTO_INCREMENT PRIMARY KEY,
     terminal_id   VARCHAR(30)  NOT NULL UNIQUE,
     merchant_name VARCHAR(100) NOT NULL,
@@ -84,10 +102,7 @@ CREATE TABLE pos_terminals (
 );
 
 -- ── 3b. TERMINAL ASSIGNMENT HISTORY ────────────────────────
--- Tracks which agent a terminal belonged to over time, so past
--- reconciliations can attribute transactions to the agent that
--- actually owned the terminal on the transaction date.
-CREATE TABLE terminal_assignments (
+CREATE TABLE IF NOT EXISTS terminal_assignments (
     id          INT AUTO_INCREMENT PRIMARY KEY,
     terminal_id INT          NOT NULL,
     agent_id    INT          NOT NULL,
@@ -103,7 +118,7 @@ CREATE TABLE terminal_assignments (
     FOREIGN KEY (changed_by)  REFERENCES users(id)
 );
 
-INSERT INTO pos_terminals (terminal_id, merchant_name, agent_id, bank_name, location, currency, last_txn_at) VALUES
+INSERT IGNORE INTO pos_terminals (terminal_id, merchant_name, agent_id, bank_name, location, currency, last_txn_at) VALUES
 ('CBZ-POS-0042', 'Harare Central Branch',   1, 'CBZ Bank', 'Harare CBD',       'ZWG',     '2025-06-17 14:32:00'),
 ('CBZ-POS-0019', 'Harare Central Branch 2', 1, 'CBZ Bank', 'Harare Avondale',  'ZWG',     '2025-06-17 11:20:00'),
 ('STAN-POS-019', 'Stanbic Bulawayo',        2, 'Stanbic',  'Bulawayo CBD',     'ZWG',     '2025-06-17 10:45:00'),
@@ -116,7 +131,10 @@ INSERT INTO pos_terminals (terminal_id, merchant_name, agent_id, bank_name, loca
 ('CBZ-POS-0044', 'CBZ Harare 3',            1, 'CBZ Bank', 'Harare Glen View', 'ZWG',     '2025-06-15 12:00:00');
 
 -- ── 4. SALES ────────────────────────────────────────────────
-CREATE TABLE sales (
+-- policy_number is NOT globally unique (renewals/top-ups create fresh
+-- rows with the same policy). Real uniqueness is per (policy, txn_date,
+-- source_system) — see uk_sale_txn below.
+CREATE TABLE IF NOT EXISTS sales (
     id             INT AUTO_INCREMENT PRIMARY KEY,
     policy_number  VARCHAR(30)   NOT NULL,
     reference_no   VARCHAR(100)  NULL,
@@ -129,20 +147,19 @@ CREATE TABLE sales (
     currency       ENUM('ZWG','USD') NOT NULL DEFAULT 'ZWG',
     source_system  ENUM('Icecash','Bordeaux','Zinara') NOT NULL DEFAULT 'Icecash',
     currency_flag  TINYINT(1)    NOT NULL DEFAULT 0,
+    -- Split-payment status: rolled up from receipts allocations.
+    paid_status    ENUM('unpaid','partial','paid','overpaid','currency_review') NOT NULL DEFAULT 'unpaid',
     upload_id      INT           NULL,
     created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_policy (policy_number),
     INDEX idx_txn_date (txn_date),
-    -- Real uniqueness is per (policy_number, txn_date, source_system).
-    -- A renewal / monthly debit / top-up is a fresh row that legitimately
-    -- shares the same policy number — the original UNIQUE on policy_number
-    -- alone blocked every period after the first.
+    INDEX idx_paid_status (paid_status),
     UNIQUE KEY uk_sale_txn (policy_number, txn_date, source_system),
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
 -- ── 5. RECEIPTS ─────────────────────────────────────────────
-CREATE TABLE receipts (
+CREATE TABLE IF NOT EXISTS receipts (
     id               INT AUTO_INCREMENT PRIMARY KEY,
     reference_no     VARCHAR(50)   NOT NULL UNIQUE,
     txn_date         DATE          NOT NULL,
@@ -150,10 +167,11 @@ CREATE TABLE receipts (
     channel          ENUM('Bank POS','iPOS','EcoCash','Zimswitch','Broker') NOT NULL,
     source_name      VARCHAR(100)  NOT NULL,
     amount           DECIMAL(15,2) NOT NULL,
+    direction        ENUM('credit','debit') NOT NULL DEFAULT 'credit',
     currency         ENUM('ZWG','USD') NOT NULL DEFAULT 'ZWG',
     matched_policy   VARCHAR(30)   NULL,
     matched_sale_id  INT           NULL,
-    match_status     ENUM('matched','pending','variance','excluded') NOT NULL DEFAULT 'pending',
+    match_status     ENUM('matched','pending','variance','excluded','partial','currency_review') NOT NULL DEFAULT 'pending',
     match_confidence ENUM('high','medium','low','manual') NULL,
     exclude_reason   VARCHAR(50)   NULL,
     exclude_note     VARCHAR(500)  NULL,
@@ -163,11 +181,13 @@ CREATE TABLE receipts (
     created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_match_status (match_status),
     INDEX idx_matched_sale (matched_sale_id),
+    INDEX idx_matched_sale_status (matched_sale_id, match_status),
+    INDEX idx_receipts_direction (direction, match_status),
     FOREIGN KEY (excluded_by) REFERENCES users(id)
 );
 
 -- ── 6. RECONCILIATION RUNS ──────────────────────────────────
-CREATE TABLE reconciliation_runs (
+CREATE TABLE IF NOT EXISTS reconciliation_runs (
     id                  INT AUTO_INCREMENT PRIMARY KEY,
     period_label        VARCHAR(30)   NOT NULL,
     product             VARCHAR(30)   NOT NULL DEFAULT 'All Products',
@@ -180,7 +200,7 @@ CREATE TABLE reconciliation_runs (
     opt_flag_fx         TINYINT(1)    NOT NULL DEFAULT 1,
     opt_bordeaux        TINYINT(1)    NOT NULL DEFAULT 1,
     opt_date_tol        TINYINT(1)    NOT NULL DEFAULT 0,
-    run_status          ENUM('running','complete','failed') NOT NULL DEFAULT 'running',
+    run_status          ENUM('running','complete','failed','superseded') NOT NULL DEFAULT 'running',
     progress_pct        TINYINT       NULL DEFAULT 0,
     progress_msg        VARCHAR(200)  NULL,
     run_by              INT           NOT NULL,
@@ -199,7 +219,7 @@ CREATE TABLE reconciliation_runs (
 );
 
 -- ── 7. VARIANCE RESULTS ─────────────────────────────────────
-CREATE TABLE variance_results (
+CREATE TABLE IF NOT EXISTS variance_results (
     id             INT AUTO_INCREMENT PRIMARY KEY,
     run_id         INT           NOT NULL,
     agent_id       INT           NOT NULL,
@@ -216,7 +236,7 @@ CREATE TABLE variance_results (
 );
 
 -- ── 7b. VARIANCE BY CHANNEL ─────────────────────────────────
-CREATE TABLE variance_by_channel (
+CREATE TABLE IF NOT EXISTS variance_by_channel (
     id           INT AUTO_INCREMENT PRIMARY KEY,
     run_id       INT NOT NULL,
     agent_id     INT NOT NULL,
@@ -233,7 +253,7 @@ CREATE TABLE variance_by_channel (
 );
 
 -- ── 7c. MANUAL MATCH LOG ────────────────────────────────────
-CREATE TABLE manual_match_log (
+CREATE TABLE IF NOT EXISTS manual_match_log (
     id         INT AUTO_INCREMENT PRIMARY KEY,
     run_id     INT          NULL,
     receipt_id INT          NOT NULL,
@@ -247,7 +267,7 @@ CREATE TABLE manual_match_log (
 );
 
 -- ── 8. UPLOAD HISTORY ───────────────────────────────────────
-CREATE TABLE upload_history (
+CREATE TABLE IF NOT EXISTS upload_history (
     id             INT AUTO_INCREMENT PRIMARY KEY,
     filename       VARCHAR(255)  NOT NULL,
     file_type      ENUM('Sales','Receipts') NOT NULL,
@@ -259,15 +279,24 @@ CREATE TABLE upload_history (
     uploaded_by    INT           NOT NULL,
     validation_msg VARCHAR(255)  NOT NULL DEFAULT 'Pending validation',
     upload_status  ENUM('processing','ok','warning','failed') NOT NULL DEFAULT 'processing',
+    flag_status    ENUM('none','flagged','resolved') NOT NULL DEFAULT 'none',
+    flagged_by     INT           NULL,
+    flagged_at     DATETIME      NULL,
+    flag_reason    VARCHAR(50)   NULL,
+    flag_note      VARCHAR(500)  NULL,
     file_path      VARCHAR(255)  NULL,
     file_hash      CHAR(64)      NULL,
     created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (uploaded_by) REFERENCES users(id),
-    INDEX idx_file_hash (file_hash)
+    INDEX idx_file_hash (file_hash),
+    INDEX idx_upload_flag (flag_status, uploaded_by)
 );
 
 -- ── 9. AUDIT LOG ────────────────────────────────────────────
-CREATE TABLE audit_log (
+-- ENUM extended to include FLAG_UPLOAD and DELETE_UPLOAD so flag_upload.php
+-- and delete_upload.php audit rows actually persist instead of being
+-- silently dropped by strict sql_mode.
+CREATE TABLE IF NOT EXISTS audit_log (
     id          INT AUTO_INCREMENT PRIMARY KEY,
     user_id     INT          NOT NULL,
     action_type ENUM('LOGIN','LOGOUT','FILE_UPLOAD','FLAG_UPLOAD','DELETE_UPLOAD','RECON_RUN','DATA_EDIT','REPORT_EXPORT','USER_MGMT') NOT NULL,
@@ -279,7 +308,7 @@ CREATE TABLE audit_log (
 );
 
 -- ── 10. ESCALATIONS ────────────────────────────────────────
-CREATE TABLE escalations (
+CREATE TABLE IF NOT EXISTS escalations (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     run_id          INT          NULL,
     agent_id        INT          NULL,
@@ -307,15 +336,15 @@ CREATE TABLE escalations (
     FOREIGN KEY (agent_id)     REFERENCES agents(id) ON DELETE SET NULL
 );
 
--- ── 10. SYSTEM SETTINGS ─────────────────────────────────────
-CREATE TABLE system_settings (
+-- ── 11. SYSTEM SETTINGS ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS system_settings (
     setting_key   VARCHAR(60)  PRIMARY KEY,
     setting_value VARCHAR(255) NOT NULL,
     updated_by    INT          NULL,
     updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
-INSERT INTO system_settings (setting_key, setting_value) VALUES
+INSERT IGNORE INTO system_settings (setting_key, setting_value) VALUES
 ('default_period_type',          'Monthly'),
 ('date_tolerance_days',          '1'),
 ('amount_tolerance_zwg',         '0'),
@@ -326,11 +355,13 @@ INSERT INTO system_settings (setting_key, setting_value) VALUES
 ('auto_escalate_threshold_zwg',  '10000'),
 ('auto_escalate_threshold_usd',  '500'),
 ('password_min_length',          '8'),
-('audit_retention_days',         '3650');
+('audit_retention_days',         '3650'),
+-- Default to the smart matcher engine. Legacy is reachable for testing
+-- only — it times out on monthly runs on shared hosts.
+('matcher_engine',               'smart');
 
--- ── 11. USER PREFERENCES ───────────────────────────────────
--- Per-user key-value store for notification + display preferences.
-CREATE TABLE user_preferences (
+-- ── 12. USER PREFERENCES ───────────────────────────────────
+CREATE TABLE IF NOT EXISTS user_preferences (
     user_id    INT          NOT NULL,
     pref_key   VARCHAR(60)  NOT NULL,
     pref_val   VARCHAR(255) NOT NULL,
@@ -339,10 +370,8 @@ CREATE TABLE user_preferences (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- ── 12. RECONCILIATION STATEMENTS ──────────────────────────
--- Formal per-agent statements snapshotted from a reconciliation
--- run. Statement numbers are auto-generated like ST-YYYY-MM-NNNN.
-CREATE TABLE statements (
+-- ── 13. STATEMENTS (per-agent recon snapshots) ─────────────
+CREATE TABLE IF NOT EXISTS statements (
     id            INT AUTO_INCREMENT PRIMARY KEY,
     statement_no  VARCHAR(30)  NOT NULL UNIQUE,
     run_id        INT          NULL,
@@ -370,3 +399,64 @@ CREATE TABLE statements (
     FOREIGN KEY (generated_by) REFERENCES users(id),
     FOREIGN KEY (reviewed_by)  REFERENCES users(id)
 );
+
+-- ── 14. LOGIN ATTEMPTS (rate limiting) ─────────────────────
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id           INT AUTO_INCREMENT PRIMARY KEY,
+    ip           VARCHAR(45) NOT NULL,
+    username     VARCHAR(50) NOT NULL,
+    attempted_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_lookup (ip, username, attempted_at)
+);
+
+-- ── 15. PASSWORD HISTORY (reuse prevention) ────────────────
+CREATE TABLE IF NOT EXISTS password_history (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    user_id       INT          NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    changed_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_user (user_id, changed_at),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- ── 16. NOTIFICATION QUEUE (outbound email) ────────────────
+CREATE TABLE IF NOT EXISTS notification_queue (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    user_id       INT          NULL,
+    recipient     VARCHAR(150) NOT NULL,
+    subject       VARCHAR(200) NOT NULL,
+    body          TEXT         NOT NULL,
+    category      VARCHAR(50)  NOT NULL,
+    status        ENUM('pending','sent','failed','skipped') NOT NULL DEFAULT 'pending',
+    attempt_count INT          NOT NULL DEFAULT 0,
+    error         VARCHAR(500) NULL,
+    created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at       DATETIME     NULL,
+    INDEX idx_status (status),
+    INDEX idx_user (user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ============================================================
+-- AUDIT-LOG IMMUTABILITY TRIGGERS
+--
+-- The audit log is the system's source of truth for "who did what".
+-- These triggers make it physically impossible to UPDATE or DELETE
+-- a row once written, even via direct SQL — including by the DBA.
+-- The only way to remove an audit row is to DROP TABLE.
+-- ============================================================
+
+DROP TRIGGER IF EXISTS prevent_audit_update;
+DROP TRIGGER IF EXISTS prevent_audit_delete;
+
+DELIMITER ;;
+CREATE TRIGGER prevent_audit_update BEFORE UPDATE ON audit_log
+FOR EACH ROW BEGIN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Audit log rows are immutable';
+END ;;
+
+CREATE TRIGGER prevent_audit_delete BEFORE DELETE ON audit_log
+FOR EACH ROW BEGIN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Audit log rows are immutable';
+END ;;
+DELIMITER ;

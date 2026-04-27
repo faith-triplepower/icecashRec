@@ -11,16 +11,20 @@ REM
 REM RESTORE PROCEDURE:
 REM   1. Stop Apache (XAMPP Control Panel)
 REM   2. Open CMD: c:\xampp\mysql\bin\mysql -u root icecash_recon
-REM   3. Run: SOURCE c:\xampp\htdocs\icecashRec\backups\icecash_YYYY-MM-DD.sql
+REM   3. Run: SOURCE c:\zimnat_backups\icecash_YYYY-MM-DD.sql
 REM   4. Restart Apache
+REM
+REM SECURITY: Backups MUST live OUTSIDE htdocs. A dump in the web root
+REM is one guessed URL away from leaking every password hash and every
+REM transaction. This script writes to c:\zimnat_backups by default.
 REM ============================================================
 
 set MYSQL_BIN=c:\xampp\mysql\bin
 set DB_NAME=icecash_recon
 set DB_USER=root
 set DB_PASS=
-set BACKUP_DIR=c:\xampp\htdocs\icecashRec\backups
-set ARCHIVE_DIR=c:\xampp\htdocs\icecashRec\backups\monthly
+set BACKUP_DIR=c:\zimnat_backups
+set ARCHIVE_DIR=c:\zimnat_backups\monthly
 set RETENTION_DAYS=30
 
 REM Create directories if missing
