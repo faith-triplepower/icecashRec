@@ -150,7 +150,7 @@ $s_stmt->close();
           <td style="display:flex;gap:6px;font-size:11px">
             <a href="uploaded_file_detail.php?id=<?= $f['id'] ?>" class="btn btn-ghost btn-sm" title="View"><i class="fa-solid fa-eye"></i></a>
             <?php if ($can_delete): ?>
-            <a href="#" onclick="deleteFile(<?= $f['id'] ?>, '<?= htmlspecialchars($f['filename']) ?>'); return false;" class="btn btn-ghost btn-sm" title="Delete" style="color:#c0392b"><i class="fa-solid fa-trash"></i></a>
+            <a href="#" onclick="deleteFile(<?= $f['id'] ?>, '<?= htmlspecialchars($f['filename'], ENT_QUOTES) ?>'); return false;" class="btn btn-ghost btn-sm" title="Delete" style="color:#c0392b"><i class="fa-solid fa-trash"></i></a>
             <?php endif; ?>
           </td>
         </tr>
@@ -173,19 +173,46 @@ $s_stmt->close();
 </div>
 
 <script>
+// Delete handler — sends a JSON request to process/delete_upload.php
+// and shows a friendly message based on the JSON reply. The endpoint
+// always replies with JSON, never HTML, so the previous bug where
+// the alert dumped a whole HTML page is no longer possible.
 function deleteFile(id, filename) {
-  if (confirm('Are you sure you want to delete "' + filename + '"?\n\nThis will also remove all associated sales/receipts records.')) {
-    fetch('../process/delete_upload.php', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'upload_id=' + id + '&_csrf=<?= csrf_token() ?>'
-    })
-    .then(r => r.text())
-    .then(msg => {
-      alert(msg);
-      location.reload();
-    });
+  if (!confirm('Are you sure you want to delete "' + filename + '"?\n\nThis will also remove all associated sales and receipts records.')) {
+    return;
   }
+
+  fetch('../process/delete_upload.php', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    credentials: 'same-origin',
+    body: 'upload_id=' + encodeURIComponent(id) +
+          '&_csrf=' + encodeURIComponent('<?= csrf_token() ?>')
+  })
+  .then(function(r) {
+    // If the session has dropped, the server may have redirected to
+    // login.php and the response will be HTML, not JSON. Catch that
+    // here so the user gets a clean message instead of raw markup.
+    return r.text().then(function(body) {
+      try {
+        return JSON.parse(body);
+      } catch (e) {
+        return {
+          ok: false,
+          message: 'Your session may have expired. Please refresh the page and try again.'
+        };
+      }
+    });
+  })
+  .then(function(res) {
+    alert(res.message);
+    if (res.ok) {
+      location.reload();
+    }
+  })
+  .catch(function(err) {
+    alert('Could not reach the server: ' + (err && err.message ? err.message : 'unknown error'));
+  });
 }
 </script>
 

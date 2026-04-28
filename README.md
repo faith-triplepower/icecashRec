@@ -32,14 +32,26 @@ Every month, Zimnat collects insurance premiums through Icecash terminals, bank 
 # 1. Place the project folder
 cp -r icecashRec/ C:/xampp/htdocs/icecashRec/
 
-# 2. Create the database (single bundled installer — schema + seed + triggers)
-mysql -u root < sql/install.sql
+# 2. Create the database, then run the installer against it
+#    (install.sql doesn't issue USE / CREATE DATABASE so it works
+#    against any host — cPanel, RDS, local XAMPP — whatever DB the
+#    connection lands on)
+mysql -u root -e "CREATE DATABASE icecash_recon CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+mysql -u root icecash_recon < sql/install.sql
 
 # 3. Start Apache + MySQL in XAMPP Control Panel
 
 # 4. Open in browser
 http://localhost/icecashRec/pages/login.php
 ```
+
+> **cPanel hosting:** create the database via cPanel → MySQL Databases
+> (the name will be prefixed, e.g. `tenddaid_icecash_recon`). Create a
+> user with full privileges, update `core/config.php`, then paste
+> `sql/install.sql` into phpMyAdmin's SQL tab while that database is
+> selected. The migration scripts in `sql/` (`extend_audit_action_types.sql`,
+> `relax_sale_uniqueness.sql`, etc.) work the same way — paste into
+> phpMyAdmin or run via the in-app `/admin/db_admin.php` page.
 
 > Existing installs upgrading from older revisions: run the per-feature
 > migrations in `sql/` (`add_direction_column.sql`,

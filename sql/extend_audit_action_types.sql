@@ -9,9 +9,11 @@
 -- audit trail.
 --
 -- Safe to run multiple times.
+--
+-- Runs against whichever database the connection is already pointed at
+-- (no USE statement) — cPanel-hosted MySQL users typically can't switch
+-- databases, so the migration must be connection-agnostic.
 -- ============================================================
-
-USE icecash_recon;
 
 ALTER TABLE audit_log
   MODIFY action_type ENUM(

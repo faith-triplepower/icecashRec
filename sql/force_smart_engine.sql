@@ -9,7 +9,7 @@
 -- Safe to run multiple times.
 -- ============================================================
 
-USE icecash_recon;
+-- Runs against whichever database the connection is already pointed at.
 
 INSERT INTO system_settings (setting_key, setting_value)
 VALUES ('matcher_engine', 'smart')

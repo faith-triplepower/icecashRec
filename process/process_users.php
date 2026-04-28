@@ -13,7 +13,6 @@ require_once '../core/auth.php';
 require_once '../core/notifications.php';
 require_role(['Manager','Admin']);
 csrf_verify();
-csrf_verify();
 
 $db     = get_db();
 $action = $_POST['action'] ?? '';

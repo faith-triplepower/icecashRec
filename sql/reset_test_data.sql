@@ -4,42 +4,48 @@
 -- Wipes all transactional / log data so you can re-test from a
 -- clean slate, while KEEPING configuration:
 --   kept   : users, agents, pos_terminals, terminal_assignments,
---            banks, system_settings, user_preferences
+--            banks, system_settings, user_preferences, audit_log
 --   wiped  : sales, receipts, reconciliation_runs, variance_results,
 --            variance_by_channel, manual_match_log, statements,
---            escalations, upload_history, audit_log, login_attempts
+--            escalations, upload_history, login_attempts
 --
 -- DESTRUCTIVE — run only when you actually want a fresh test run.
--- Use TRUNCATE (resets AUTO_INCREMENT) inside a FK-disabled block
--- so order doesn't matter.
+--
+-- Uses DELETE FROM rather than TRUNCATE because cPanel-hosted MySQL
+-- accounts typically lack the DROP privilege that TRUNCATE requires.
+-- DELETE only needs DELETE privilege, which app users always have.
+-- The trade-off: AUTO_INCREMENT counters keep climbing instead of
+-- resetting to 1 — harmless for test data.
+--
+-- Order is dependents-first so foreign-key constraints are satisfied
+-- without needing SUPER to disable FK checks.
+--
+-- audit_log is INTENTIONALLY kept. It's the immutable record of
+-- "who did what" — wiping it on every test reset defeats its
+-- purpose, and on installs that have run install.sql there are
+-- triggers blocking the DELETE anyway.
 -- ============================================================
 
-USE icecash_recon;
+-- Runs against whichever database the connection is already pointed at.
 
-SET FOREIGN_KEY_CHECKS = 0;
+DELETE FROM variance_by_channel;
+DELETE FROM variance_results;
+DELETE FROM manual_match_log;
+DELETE FROM statements;
+DELETE FROM escalations;
+DELETE FROM reconciliation_runs;
+DELETE FROM receipts;
+DELETE FROM sales;
+DELETE FROM upload_history;
 
-TRUNCATE TABLE variance_by_channel;
-TRUNCATE TABLE variance_results;
-TRUNCATE TABLE manual_match_log;
-TRUNCATE TABLE statements;
-TRUNCATE TABLE escalations;
-TRUNCATE TABLE reconciliation_runs;
-TRUNCATE TABLE receipts;
-TRUNCATE TABLE sales;
-TRUNCATE TABLE upload_history;
-TRUNCATE TABLE audit_log;
-
--- login_attempts may not exist on every install (depends on which
--- migration was last applied) — guard with IF EXISTS.
+-- login_attempts is created by some migrations and not others — guard.
 SET @stmt = (SELECT IF(
     (SELECT COUNT(*) FROM information_schema.tables
        WHERE table_schema = DATABASE() AND table_name = 'login_attempts') > 0,
-    'TRUNCATE TABLE login_attempts',
+    'DELETE FROM login_attempts',
     'SELECT 1'
 ));
 PREPARE s FROM @stmt; EXECUTE s; DEALLOCATE PREPARE s;
-
-SET FOREIGN_KEY_CHECKS = 1;
 
 -- Sanity-check counts after the wipe.
 SELECT

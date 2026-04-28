@@ -67,69 +67,6 @@ switch ($type) {
         while ($r = $rows->fetch_assoc()) fputcsv($out, array_values($r));
         break;
 
-    case 'upload':
-        // Full dataset export for a single upload_history row. The file
-        // detail page caps the on-screen preview to 100 rows; this case
-        // lets a Manager / Admin / Uploader pull the complete dataset.
-        $upload_id = (int)(isset($_GET['upload_id']) ? $_GET['upload_id'] : 0);
-        if (!$upload_id) die('upload_id required');
-
-        $u_stmt = $db->prepare(
-            "SELECT id, filename, file_type, uploaded_by
-             FROM upload_history WHERE id = ?"
-        );
-        $u_stmt->bind_param('i', $upload_id);
-        $u_stmt->execute();
-        $up = $u_stmt->get_result()->fetch_assoc();
-        $u_stmt->close();
-        if (!$up) die('Upload not found');
-
-        // Uploaders may only export their own uploads — same scope rule
-        // the file-detail page enforces.
-        if ($user['role'] === 'Uploader' && (int)$up['uploaded_by'] !== (int)$user['id']) {
-            http_response_code(403);
-            die('Not authorized to export this upload');
-        }
-
-        $safe_base = preg_replace('/\.[^.]+$/', '', $up['filename']);
-        $safe_base = preg_replace('/[^a-zA-Z0-9._-]+/', '_', $safe_base);
-        $out = csv_start("upload_{$upload_id}_{$safe_base}.csv");
-
-        if ($up['file_type'] === 'Sales') {
-            fputcsv($out, array(
-                'Policy #','Reference','Date','Agent','Product','Method',
-                'Amount','Currency','Source System','Code'
-            ));
-            $rs = $db->prepare(
-                "SELECT s.policy_number, s.reference_no, s.txn_date, a.agent_name,
-                        s.product, s.payment_method, s.amount, s.currency,
-                        s.source_system, s.txn_code
-                 FROM sales s
-                 LEFT JOIN agents a ON s.agent_id = a.id
-                 WHERE s.upload_id = ?
-                 ORDER BY s.id"
-            );
-        } else {
-            fputcsv($out, array(
-                'Reference','Date','Terminal','Channel','Source','Amount',
-                'Currency','Direction','Match Status','Matched Policy','Confidence'
-            ));
-            $rs = $db->prepare(
-                "SELECT reference_no, txn_date, terminal_id, channel, source_name,
-                        amount, currency, direction, match_status,
-                        matched_policy, match_confidence
-                 FROM receipts
-                 WHERE upload_id = ?
-                 ORDER BY id"
-            );
-        }
-        $rs->bind_param('i', $upload_id);
-        $rs->execute();
-        $res = $rs->get_result();
-        while ($r = $res->fetch_assoc()) fputcsv($out, array_values($r));
-        $rs->close();
-        break;
-
     case 'statements':
         $from = isset($_GET['from']) ? $_GET['from'] : date('Y-m-01');
         $to = isset($_GET['to']) ? $_GET['to'] : date('Y-m-t');

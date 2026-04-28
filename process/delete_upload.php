@@ -1,130 +1,136 @@
 <?php
 // ============================================================
 // process/delete_upload.php
+// Delete an uploaded file and its associated sales/receipts.
 //
-// Delete an uploaded file and its associated rows.
-//
-// Permissions:
-//   - Uploader can delete ONLY their own uploads
-//   - Manager/Admin can delete anyone's upload
-//
-// Safety guarantees:
-//   - Refuses to delete an upload referenced by a draft / final /
-//     reviewed statement — the statement must be cancelled first.
-//   - Unlinks any matched receipts pointing at sales we're about to
-//     delete (so we don't orphan receipts.matched_sale_id values).
-//   - Audit log INSERT runs INSIDE the transaction; if the audit row
-//     fails to write, the entire delete is rolled back. Destruction
-//     without a record is a worse outcome than a failed delete.
-//   - Always redirects (never die()), so refreshing the result page
-//     does not replay the action.
+// IMPORTANT: This endpoint is called via fetch() from the
+// uploaded files page. It MUST always return JSON, never HTML.
+// That is why it does its own auth checks instead of using
+// require_login() / require_role(), which redirect to login
+// pages on failure (and the browser would render that HTML
+// inside the alert() popup).
 // ============================================================
 
 require_once '../core/auth.php';
-require_role(array('Manager','Admin','Uploader'));
-csrf_verify();
 
-$db        = get_db();
-$user      = current_user();
-$uid       = (int)$user['id'];
-$upload_id = (int)($_POST['upload_id'] ?? 0);
+// All responses are JSON
+header('Content-Type: application/json; charset=utf-8');
 
-function back($type, $msg) {
-    header('Location: ' . BASE_URL . '/utilities/uploaded_files_list.php?'
-        . $type . '=' . urlencode($msg));
+function jsend($ok, $message) {
+    echo json_encode(array('ok' => (bool)$ok, 'message' => $message));
     exit;
 }
 
-if (!$upload_id) back('error', 'Invalid upload ID');
+// ── 1. Auth: must be logged in ────────────────────────────────
+if (!is_logged_in()) {
+    jsend(false, 'Your session has expired. Please refresh the page and log in again.');
+}
 
-// Load the upload row
+$user = current_user();
+if (!$user) {
+    jsend(false, 'Your session has expired. Please refresh the page and log in again.');
+}
+
+// ── 2. Auth: role must be allowed to delete ──────────────────
+$allowed_roles = array('Manager', 'Admin', 'Uploader');
+if (!in_array($user['role'], $allowed_roles, true)) {
+    jsend(false, 'You do not have permission to delete uploaded files.');
+}
+
+// ── 3. CSRF check (do it ourselves so we get JSON, not text) ──
+$posted_token = isset($_POST['_csrf']) ? $_POST['_csrf'] : '';
+if (!hash_equals(csrf_token(), $posted_token)) {
+    jsend(false, 'Security token expired. Please refresh the page and try again.');
+}
+
+// ── 4. Validate input ────────────────────────────────────────
+$db = get_db();
+$upload_id = (int)(isset($_POST['upload_id']) ? $_POST['upload_id'] : 0);
+if ($upload_id <= 0) {
+    jsend(false, 'Invalid upload ID.');
+}
+
+// ── 5. Fetch the upload row (prepared statement) ─────────────
 $stmt = $db->prepare('SELECT * FROM upload_history WHERE id = ?');
 $stmt->bind_param('i', $upload_id);
 $stmt->execute();
 $upload = $stmt->get_result()->fetch_assoc();
 $stmt->close();
-
-if (!$upload) back('error', 'Upload not found');
-
-// Uploader role: own files only.
-if ($user['role'] === 'Uploader' && (int)$upload['uploaded_by'] !== $uid) {
-    back('error', 'You can only delete your own uploads');
+if (!$upload) {
+    jsend(false, 'Upload not found. It may have already been deleted.');
 }
 
-// Block deletion if any sales row from this upload feeds an active
-// statement. Cancelled statements are fine (their numbers no longer
-// matter); draft / final / reviewed are not.
+// ── 6. Uploaders can only delete files they uploaded ─────────
+if ($user['role'] === 'Uploader' && (int)$upload['uploaded_by'] !== (int)$user['id']) {
+    jsend(false, 'You can only delete files you uploaded yourself.');
+}
+
+// ── 7. Block deletion if any rows are referenced by an active
+//      statement, so finalised reconciliations cannot lose
+//      their underlying data.
 $used_stmt = $db->prepare("
-    SELECT COUNT(*) c
-      FROM statements st
-      JOIN sales s ON s.agent_id = st.agent_id
-     WHERE s.upload_id = ?
-       AND st.status IN ('draft','final','reviewed')
+    SELECT COUNT(*) AS c
+    FROM statements st
+    JOIN sales s ON s.agent_id = st.agent_id
+    WHERE s.upload_id = ?
+      AND st.status IN ('draft','final','reviewed')
 ");
 $used_stmt->bind_param('i', $upload_id);
 $used_stmt->execute();
 $used_cnt = (int)$used_stmt->get_result()->fetch_assoc()['c'];
 $used_stmt->close();
 if ($used_cnt > 0) {
-    back('error', "This upload feeds {$used_cnt} active statement(s). Cancel them before deleting.");
+    jsend(false, "This upload is referenced by {$used_cnt} active statement(s). Cancel those statements first.");
 }
 
+// ── 8. Delete inside a transaction ───────────────────────────
 try {
     $db->begin_transaction();
 
-    // Count first so the audit row records exact impact
-    $cnt_s = $db->prepare('SELECT COUNT(*) c FROM sales WHERE upload_id = ?');
-    $cnt_s->bind_param('i', $upload_id);
-    $cnt_s->execute();
-    $sales_cnt = (int)$cnt_s->get_result()->fetch_assoc()['c'];
-    $cnt_s->close();
+    // Count what we are about to remove (for the audit detail)
+    $sales_cnt = (int)$db->query(
+        "SELECT COUNT(*) c FROM sales WHERE upload_id = {$upload_id}"
+    )->fetch_assoc()['c'];
+    $rec_cnt = (int)$db->query(
+        "SELECT COUNT(*) c FROM receipts WHERE upload_id = {$upload_id}"
+    )->fetch_assoc()['c'];
 
-    $cnt_r = $db->prepare('SELECT COUNT(*) c FROM receipts WHERE upload_id = ?');
-    $cnt_r->bind_param('i', $upload_id);
-    $cnt_r->execute();
-    $rec_cnt = (int)$cnt_r->get_result()->fetch_assoc()['c'];
-    $cnt_r->close();
-
-    // Detach matched receipts that point at sales we're about to drop
-    // — otherwise they'd be left with a dangling matched_sale_id.
-    $u1 = $db->prepare("
+    // Unlink any matched receipts that point at sales we are deleting,
+    // so we never leave dangling matched_sale_id references behind.
+    $db->query("
         UPDATE receipts
            SET matched_sale_id = NULL,
                matched_policy  = NULL,
                match_status    = 'pending',
                match_confidence = NULL
-         WHERE matched_sale_id IN (SELECT id FROM sales WHERE upload_id = ?)
+         WHERE matched_sale_id IN (
+             SELECT id FROM (SELECT id FROM sales WHERE upload_id = {$upload_id}) AS s
+         )
     ");
-    $u1->bind_param('i', $upload_id);
-    $u1->execute();
-    $u1->close();
 
-    $d1 = $db->prepare('DELETE FROM sales WHERE upload_id = ?');
-    $d1->bind_param('i', $upload_id);
-    $d1->execute();
-    $d1->close();
+    $db->query("DELETE FROM sales          WHERE upload_id = {$upload_id}");
+    $db->query("DELETE FROM receipts       WHERE upload_id = {$upload_id}");
+    $db->query("DELETE FROM upload_history WHERE id        = {$upload_id}");
 
-    $d2 = $db->prepare('DELETE FROM receipts WHERE upload_id = ?');
-    $d2->bind_param('i', $upload_id);
-    $d2->execute();
-    $d2->close();
-
-    $d3 = $db->prepare('DELETE FROM upload_history WHERE id = ?');
-    $d3->bind_param('i', $upload_id);
-    $d3->execute();
-    $d3->close();
-
-    // Audit row INSIDE the transaction. If this fails, the whole
-    // deletion rolls back — we'd rather refuse the operation than
-    // destroy data without a record of who did it.
-    audit_log_entry($uid, 'DELETE_UPLOAD',
-        "Deleted upload: {$upload['filename']} ({$sales_cnt} sales, {$rec_cnt} receipts)");
+    // Audit log INSIDE the transaction. Use 'DATA_EDIT' because
+    // it is already a valid value in the audit_log.action_type
+    // ENUM. Do NOT use 'DELETE_UPLOAD' until the schema has been
+    // migrated to allow that value.
+    $detail = "Deleted upload: {$upload['filename']} ({$sales_cnt} sales, {$rec_cnt} receipts)";
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '';
+    $uid = (int)$user['id'];
+    $a = $db->prepare("
+        INSERT INTO audit_log (user_id, action_type, detail, ip_address, result, created_at)
+        VALUES (?, 'DATA_EDIT', ?, ?, 'success', NOW())
+    ");
+    $a->bind_param('iss', $uid, $detail, $ip);
+    $a->execute();
+    $a->close();
 
     $db->commit();
-    back('success', "Deleted {$upload['filename']} — {$sales_cnt} sales and {$rec_cnt} receipts removed.");
 
+    jsend(true, "Deleted {$upload['filename']} — removed {$sales_cnt} sales and {$rec_cnt} receipts.");
 } catch (Exception $e) {
     $db->rollback();
-    error_log('delete_upload failed: ' . $e->getMessage());
-    back('error', 'Delete failed: ' . $e->getMessage());
+    jsend(false, 'Delete failed: ' . $e->getMessage());
 }

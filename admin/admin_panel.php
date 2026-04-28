@@ -101,7 +101,7 @@ $db_size = $db_size_row ? $db_size_row['size_mb'] : '?';
         <div class="stat-label">Audit Log Entries</div>
         <div class="stat-value"><?= fmt_compact($stats['audit_log']) ?></div>
         <div class="stat-sub">All time</div>
-</div>
+    </div>
     <div class="stat-card">
         <div class="stat-label">DB Size</div>
         <div class="stat-value"><?= $db_size ?> <span style="font-size:14px">MB</span></div>

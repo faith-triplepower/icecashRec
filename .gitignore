@@ -1,5 +1,5 @@
 # Database credentials — never commit these
-
+core/config.php
 
 # Uploaded files (data goes to DB, not disk)
 uploads/
@@ -25,4 +25,3 @@ desktop.ini
 # XAMPP temp
 /tmp/
 exports/
-core/config.php 

@@ -1,22 +1,31 @@
 -- ============================================================
 -- install.sql — Single-file installer for IceCashRec
 --
--- Runs on a fresh MySQL/MariaDB instance and produces the full
--- schema + seed data + audit triggers ready for a first login.
--- Bundles every column and table that's been added incrementally
--- via the per-feature migration files in this folder, so a fresh
--- install never has to chase migrations.
+-- Runs against whichever MySQL/MariaDB database your connection is
+-- pointed at, and produces the full schema + seed data + audit
+-- triggers ready for a first login. Bundles every column and table
+-- that's been added incrementally via the per-feature migration
+-- files in this folder, so a fresh install never has to chase
+-- migrations.
 --
--- Usage:
---   mysql -u root < sql/install.sql
+-- Usage on a local install (XAMPP / dev):
+--   mysql -u root -e "CREATE DATABASE icecash_recon CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+--   mysql -u root icecash_recon < sql/install.sql
 --
--- Idempotent in spirit: CREATE DATABASE IF NOT EXISTS, IF NOT EXISTS
--- on tables, INSERT IGNORE on seed rows. Safe to re-run.
+-- Usage on cPanel / shared hosting:
+--   1. Create the database via cPanel → MySQL Databases (your
+--      cPanel-prefixed name, e.g. tenddaid_icecash_recon).
+--   2. Create a MySQL user with ALL privileges on that database.
+--   3. Update core/config.php with the new credentials.
+--   4. In phpMyAdmin, select the new database, then paste this file
+--      into the SQL tab and run it.
+--
+-- This file does NOT issue CREATE DATABASE or USE statements,
+-- because cPanel-hosted MySQL users can't run those.
+--
+-- Idempotent in spirit: IF NOT EXISTS on tables, INSERT IGNORE on
+-- seed rows. Safe to re-run.
 -- ============================================================
-
-CREATE DATABASE IF NOT EXISTS icecash_recon
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE icecash_recon;
 
 -- ── 1. USERS ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (

@@ -292,19 +292,54 @@ if (!function_exists('find_pdftotext')) {
     }
 }
 
-// Run pdftotext and return raw text. Shared by both PDF parsing strategies.
+// Run pdftotext and return raw text. Shared by every PDF parsing
+// strategy. Tries -layout first (preserves columns — required for the
+// Ecobank columnar parser), then falls back to plain extraction if
+// -layout returns nothing usable. Production hosts sometimes ship a
+// stripped pdftotext (or a same-named binary that isn't poppler) and
+// silently return empty for -layout; the fallback recovers from that.
 if (!function_exists('_ingestion_pdftotext_run')) {
     function _ingestion_pdftotext_run($filepath) {
         $bin = find_pdftotext();
         if (!$bin) {
-            throw new Exception('pdftotext not available — install Poppler or Git for Windows, or set pdftotext_path in system settings');
+            throw new Exception('pdftotext not available — install Poppler (Linux: `apt install poppler-utils` / cPanel: ask host support) or Git for Windows, or set pdftotext_path in system settings');
         }
-        $cmd = escapeshellarg($bin) . ' -layout -nopgbrk ' . escapeshellarg($filepath) . ' -';
-        $text = @shell_exec($cmd . ' 2>&1');
-        if (!$text || stripos($text, 'error') === 0) {
-            throw new Exception('pdftotext failed: ' . substr(trim($text ?: 'no output'), 0, 200));
+
+        $attempts = array(
+            'layout' => escapeshellarg($bin) . ' -layout -nopgbrk ' . escapeshellarg($filepath) . ' - 2>&1',
+            // Plain extraction — no -layout. Reads top-to-bottom in
+            // document order. Loses the column geometry but works on
+            // every poppler version, including stripped builds.
+            'plain'  => escapeshellarg($bin) . ' -nopgbrk '          . escapeshellarg($filepath) . ' - 2>&1',
+            // Raw mode — preserves the original document order with
+            // less heuristic intervention. Last-ditch.
+            'raw'    => escapeshellarg($bin) . ' -raw -nopgbrk '     . escapeshellarg($filepath) . ' - 2>&1',
+        );
+
+        $best     = '';
+        $best_len = 0;
+        $tried    = array();
+        foreach ($attempts as $mode => $cmd) {
+            $out = @shell_exec($cmd);
+            $stripped = $out !== null ? trim(preg_replace('/[\s\f]+/', ' ', $out)) : '';
+            $len      = strlen($stripped);
+            $tried[]  = "$mode=$len";
+            if ($len > $best_len) {
+                $best     = $out;
+                $best_len = $len;
+            }
+            if ($best_len >= 200) break; // good enough — no need to try more
         }
-        return $text;
+
+        // If even the best attempt is empty / starts with 'error', surface
+        // a debuggable message including the binary path and what each
+        // mode produced so the operator can tell why it failed.
+        if (!$best || stripos($best, 'error') === 0) {
+            throw new Exception('pdftotext failed using ' . $bin
+                . ' (modes: ' . implode(', ', $tried) . '): '
+                . substr(trim($best ?: 'no output'), 0, 200));
+        }
+        return $best;
     }
 }
 
@@ -331,9 +366,25 @@ if (!function_exists('read_pdf_rows')) {
         // Image-based / scanned PDF detection. pdftotext returns close to
         // nothing (form-feeds, page numbers) for these — no point running
         // the row parsers, just tell the user so they can convert it.
+        // We still drop a diagnostic dump even at this stage so the
+        // operator can confirm whether the PDF really is image-only or
+        // whether the host's pdftotext is misbehaving.
         $stripped = trim(preg_replace('/[\s\f]+/', ' ', $text));
         if (strlen($stripped) < 80) {
-            throw new Exception('PDF appears to be scanned / image-based — pdftotext extracted no usable text. OCR the PDF first (e.g. with Adobe Acrobat or tesseract) and re-upload.');
+            $dump_path = null;
+            $stem = 'pdf_extract_tiny_' . date('Ymd_His') . '_' . basename($filepath) . '.txt';
+            foreach (array(dirname(__DIR__) . '/uploads', dirname(__DIR__) . '/exports', sys_get_temp_dir()) as $dir) {
+                if (!is_dir($dir)) @mkdir($dir, 0755, true);
+                if (!is_dir($dir) || !is_writable($dir)) continue;
+                $try = $dir . DIRECTORY_SEPARATOR . $stem;
+                if (@file_put_contents($try, $text) !== false) { $dump_path = $try; break; }
+            }
+            $hint = $dump_path ? " Diagnostic ({$stripped} chars) saved to {$dump_path}." : '';
+            throw new Exception('PDF appears to be scanned / image-based — pdftotext extracted only '
+                . strlen($stripped) . ' chars of usable text. If the PDF clearly has selectable text '
+                . 'when you view it, your pdftotext binary may not support -layout — run '
+                . '`pdftotext -v` on the server to check the version. Otherwise OCR the PDF first '
+                . '(e.g. with Adobe Acrobat or tesseract) and re-upload.' . $hint);
         }
 
         // Run every strategy and take the best. None of them throw

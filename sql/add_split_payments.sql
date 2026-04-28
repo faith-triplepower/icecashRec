@@ -8,7 +8,9 @@
 -- before they count as paid.
 -- ============================================================
 
-USE icecash_recon;
+-- Runs against whichever database the connection is already pointed at
+-- (no USE statement) — cPanel-hosted MySQL users typically can't switch
+-- databases, so the migration must be connection-agnostic.
 
 -- 1. New receipt match_status values.
 --    'partial'         : receipt is allocated to a sale that is not yet fully paid.
