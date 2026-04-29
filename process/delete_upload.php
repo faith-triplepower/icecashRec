@@ -68,19 +68,57 @@ if ($user['role'] === 'Uploader' && (int)$upload['uploaded_by'] !== (int)$user['
 // ── 7. Block deletion if any rows are referenced by an active
 //      statement, so finalised reconciliations cannot lose
 //      their underlying data.
+// Returns the actual blocking statement numbers so the user can
+// find and cancel them — instead of a useless COUNT.
+ 
 $used_stmt = $db->prepare("
-    SELECT COUNT(*) AS c
+    SELECT DISTINCT st.id, st.statement_no, st.status, a.agent_name,
+                    st.period_from, st.period_to,
+                    'sale' AS source_type
     FROM statements st
-    JOIN sales s ON s.agent_id = st.agent_id
+    JOIN agents a ON a.id = st.agent_id
+    JOIN sales s
+      ON s.agent_id  = st.agent_id
+     AND s.txn_date  BETWEEN st.period_from AND st.period_to
     WHERE s.upload_id = ?
       AND st.status IN ('draft','final','reviewed')
+ 
+    UNION
+ 
+    SELECT DISTINCT st.id, st.statement_no, st.status, a.agent_name,
+                    st.period_from, st.period_to,
+                    'receipt' AS source_type
+    FROM statements st
+    JOIN agents a ON a.id = st.agent_id
+    JOIN receipts r
+      ON r.matched_sale_id IS NOT NULL
+     AND r.txn_date BETWEEN st.period_from AND st.period_to
+    JOIN sales s2 ON s2.id = r.matched_sale_id AND s2.agent_id = st.agent_id
+    WHERE r.upload_id = ?
+      AND st.status IN ('draft','final','reviewed')
 ");
-$used_stmt->bind_param('i', $upload_id);
+$used_stmt->bind_param('ii', $upload_id, $upload_id);
 $used_stmt->execute();
-$used_cnt = (int)$used_stmt->get_result()->fetch_assoc()['c'];
+$blockers = $used_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $used_stmt->close();
-if ($used_cnt > 0) {
-    jsend(false, "This upload is referenced by {$used_cnt} active statement(s). Cancel those statements first.");
+ 
+if (!empty($blockers)) {
+    // Build a friendly message listing the blocking statements
+    $lines = array();
+    foreach ($blockers as $b) {
+        $lines[] = sprintf(
+            '%s — %s (%s) [%s..%s]',
+            $b['statement_no'],
+            $b['agent_name'],
+            strtoupper($b['status']),
+            $b['period_from'],
+            $b['period_to']
+        );
+    }
+    $msg = "Cannot delete: this upload feeds " . count($blockers) .
+           " active statement(s). Cancel them first:\n• " .
+           implode("\n• ", $lines);
+    jsend(false, $msg);
 }
 
 // ── 8. Delete inside a transaction ───────────────────────────
