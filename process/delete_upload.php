@@ -3,54 +3,61 @@
 // process/delete_upload.php
 // Delete an uploaded file and its associated sales/receipts.
 //
-// IMPORTANT: This endpoint is called via fetch() from the
-// uploaded files page. It MUST always return JSON, never HTML.
-// That is why it does its own auth checks instead of using
-// require_login() / require_role(), which redirect to login
-// pages on failure (and the browser would render that HTML
-// inside the alert() popup).
+// Two modes:
+//   mode=preview  → returns JSON describing what *would* be deleted
+//                   (sales count, receipts count, list of impacted
+//                   statements). UI uses this to show a warning.
+//   mode=force    → actually deletes. Cancels any blocking statements
+//                   first (with audit trail), then removes the data.
+//   (no mode)     → legacy behaviour: refuse if any active statement
+//                   exists. Kept for any callers we haven't updated.
+//
+// Always returns JSON.
 // ============================================================
 
 require_once '../core/auth.php';
 
-// All responses are JSON
 header('Content-Type: application/json; charset=utf-8');
 
-function jsend($ok, $message) {
-    echo json_encode(array('ok' => (bool)$ok, 'message' => $message));
+function jsend($ok, $message, $extra = array()) {
+    echo json_encode(array_merge(
+        array('ok' => (bool)$ok, 'message' => $message),
+        $extra
+    ));
     exit;
 }
 
-// ── 1. Auth: must be logged in ────────────────────────────────
+// ── 1. Auth ──────────────────────────────────────────────────
 if (!is_logged_in()) {
     jsend(false, 'Your session has expired. Please refresh the page and log in again.');
 }
-
 $user = current_user();
 if (!$user) {
     jsend(false, 'Your session has expired. Please refresh the page and log in again.');
 }
 
-// ── 2. Auth: role must be allowed to delete ──────────────────
+// ── 2. Role check ────────────────────────────────────────────
 $allowed_roles = array('Manager', 'Admin', 'Uploader');
 if (!in_array($user['role'], $allowed_roles, true)) {
     jsend(false, 'You do not have permission to delete uploaded files.');
 }
 
-// ── 3. CSRF check (do it ourselves so we get JSON, not text) ──
+// ── 3. CSRF ──────────────────────────────────────────────────
 $posted_token = isset($_POST['_csrf']) ? $_POST['_csrf'] : '';
 if (!hash_equals(csrf_token(), $posted_token)) {
     jsend(false, 'Security token expired. Please refresh the page and try again.');
 }
 
 // ── 4. Validate input ────────────────────────────────────────
-$db = get_db();
-$upload_id = (int)(isset($_POST['upload_id']) ? $_POST['upload_id'] : 0);
+$db        = get_db();
+$upload_id = (int)($_POST['upload_id'] ?? 0);
+$mode      = $_POST['mode'] ?? '';   // 'preview' | 'force' | ''
+
 if ($upload_id <= 0) {
     jsend(false, 'Invalid upload ID.');
 }
 
-// ── 5. Fetch the upload row (prepared statement) ─────────────
+// ── 5. Fetch the upload row ──────────────────────────────────
 $stmt = $db->prepare('SELECT * FROM upload_history WHERE id = ?');
 $stmt->bind_param('i', $upload_id);
 $stmt->execute();
@@ -65,109 +72,186 @@ if ($user['role'] === 'Uploader' && (int)$upload['uploaded_by'] !== (int)$user['
     jsend(false, 'You can only delete files you uploaded yourself.');
 }
 
-// ── 7. Block deletion if any rows are referenced by an active
-//      statement, so finalised reconciliations cannot lose
-//      their underlying data.
-// Returns the actual blocking statement numbers so the user can
-// find and cancel them — instead of a useless COUNT.
- 
-$used_stmt = $db->prepare("
-    SELECT DISTINCT st.id, st.statement_no, st.status, a.agent_name,
-                    st.period_from, st.period_to,
-                    'sale' AS source_type
-    FROM statements st
-    JOIN agents a ON a.id = st.agent_id
-    JOIN sales s
-      ON s.agent_id  = st.agent_id
-     AND s.txn_date  BETWEEN st.period_from AND st.period_to
-    WHERE s.upload_id = ?
-      AND st.status IN ('draft','final','reviewed')
- 
-    UNION
- 
-    SELECT DISTINCT st.id, st.statement_no, st.status, a.agent_name,
-                    st.period_from, st.period_to,
-                    'receipt' AS source_type
-    FROM statements st
-    JOIN agents a ON a.id = st.agent_id
-    JOIN receipts r
-      ON r.matched_sale_id IS NOT NULL
-     AND r.txn_date BETWEEN st.period_from AND st.period_to
-    JOIN sales s2 ON s2.id = r.matched_sale_id AND s2.agent_id = st.agent_id
-    WHERE r.upload_id = ?
-      AND st.status IN ('draft','final','reviewed')
-");
-$used_stmt->bind_param('ii', $upload_id, $upload_id);
-$used_stmt->execute();
-$blockers = $used_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-$used_stmt->close();
- 
-if (!empty($blockers)) {
-    // Build a friendly message listing the blocking statements
-    $lines = array();
-    foreach ($blockers as $b) {
-        $lines[] = sprintf(
-            '%s — %s (%s) [%s..%s]',
-            $b['statement_no'],
-            $b['agent_name'],
-            strtoupper($b['status']),
-            $b['period_from'],
-            $b['period_to']
-        );
-    }
-    $msg = "Cannot delete: this upload feeds " . count($blockers) .
-           " active statement(s). Cancel them first:\n• " .
-           implode("\n• ", $lines);
-    jsend(false, $msg);
+// ── 7. Force-delete is restricted to Manager/Admin ───────────
+// An Uploader can preview but cannot cascade-cancel statements.
+// Statements are financial documents — only Manager/Admin can wipe them.
+if ($mode === 'force' && !in_array($user['role'], array('Manager','Admin'), true)) {
+    jsend(false, 'Only Managers or Admins can force-delete an upload that has active statements. Ask a Manager to do this for you.');
 }
 
-// ── 8. Delete inside a transaction ───────────────────────────
+// ── 8. Helper: fetch row counts + impacted statements ────────
+function gather_impact($db, $upload_id) {
+    $sales_cnt = (int)$db->query(
+        "SELECT COUNT(*) c FROM sales WHERE upload_id = $upload_id"
+    )->fetch_assoc()['c'];
+    $rec_cnt = (int)$db->query(
+        "SELECT COUNT(*) c FROM receipts WHERE upload_id = $upload_id"
+    )->fetch_assoc()['c'];
+
+    // A statement is impacted if any of its underlying sales OR
+    // matched receipts come from this upload. We use UNION on the
+    // distinct statement_id so each statement is counted once.
+    $impact_sql = "
+        SELECT DISTINCT st.id, st.statement_no, st.status,
+                        a.agent_name,
+                        st.period_from, st.period_to,
+                        st.variance_zwg, st.variance_usd,
+                        st.generated_by
+        FROM statements st
+        JOIN agents a ON a.id = st.agent_id
+        WHERE st.status IN ('draft','final','reviewed')
+          AND (
+                st.id IN (
+                    SELECT st2.id FROM statements st2
+                    JOIN sales s
+                      ON s.agent_id = st2.agent_id
+                     AND s.txn_date BETWEEN st2.period_from AND st2.period_to
+                    WHERE s.upload_id = $upload_id
+                )
+             OR st.id IN (
+                    SELECT st3.id FROM statements st3
+                    JOIN receipts r ON r.upload_id = $upload_id
+                    JOIN sales s2 ON s2.id = r.matched_sale_id
+                    WHERE s2.agent_id = st3.agent_id
+                      AND r.txn_date BETWEEN st3.period_from AND st3.period_to
+                )
+          )
+        ORDER BY st.statement_no
+    ";
+    $impacted = $db->query($impact_sql)->fetch_all(MYSQLI_ASSOC);
+
+    return array(
+        'sales_count'    => $sales_cnt,
+        'receipts_count' => $rec_cnt,
+        'statements'     => $impacted,
+    );
+}
+
+// ── 9. PREVIEW mode ──────────────────────────────────────────
+if ($mode === 'preview') {
+    $impact = gather_impact($db, $upload_id);
+
+    $can_force = in_array($user['role'], array('Manager','Admin'), true);
+    $msg_parts = array();
+    $msg_parts[] = $impact['sales_count']    . ' sale(s)';
+    $msg_parts[] = $impact['receipts_count'] . ' receipt(s)';
+    if (!empty($impact['statements'])) {
+        $msg_parts[] = count($impact['statements']) . ' statement(s) will be cancelled';
+    }
+
+    jsend(true, 'Preview ready', array(
+        'preview'        => true,
+        'filename'       => $upload['filename'],
+        'sales_count'    => $impact['sales_count'],
+        'receipts_count' => $impact['receipts_count'],
+        'statements'     => $impact['statements'],
+        'has_blockers'   => !empty($impact['statements']),
+        'can_force'      => $can_force,
+        'summary'        => 'You are about to delete: ' . implode(', ', $msg_parts) . '.',
+    ));
+}
+
+// ── 10. Determine path: clean delete vs force ────────────────
+$impact      = gather_impact($db, $upload_id);
+$has_blockers = !empty($impact['statements']);
+
+if ($has_blockers && $mode !== 'force') {
+    // Legacy / no-mode caller — keep the old behaviour: refuse and
+    // tell them what's blocking. The new UI never lands here because
+    // it always uses preview → force.
+    $lines = array();
+    foreach ($impact['statements'] as $b) {
+        $lines[] = $b['statement_no'] . ' (' . strtoupper($b['status']) . ', ' . $b['agent_name'] . ')';
+    }
+    jsend(false,
+        'This upload feeds ' . count($impact['statements']) . ' active statement(s). ' .
+        'Re-submit with mode=force to cancel them and proceed. Statements: ' .
+        implode(', ', $lines)
+    );
+}
+
+// ── 11. Perform the delete in a transaction ──────────────────
 try {
     $db->begin_transaction();
 
-    // Count what we are about to remove (for the audit detail)
-    $sales_cnt = (int)$db->query(
-        "SELECT COUNT(*) c FROM sales WHERE upload_id = {$upload_id}"
-    )->fetch_assoc()['c'];
-    $rec_cnt = (int)$db->query(
-        "SELECT COUNT(*) c FROM receipts WHERE upload_id = {$upload_id}"
-    )->fetch_assoc()['c'];
+    $sales_cnt     = $impact['sales_count'];
+    $rec_cnt       = $impact['receipts_count'];
+    $cancelled_no  = array();   // for the audit detail
+    $reason        = trim($_POST['reason'] ?? '');
 
-    // Unlink any matched receipts that point at sales we are deleting,
-    // so we never leave dangling matched_sale_id references behind.
+    // 11a. If force, cancel every blocking statement first.
+    if ($mode === 'force' && $has_blockers) {
+        if (strlen($reason) < 5) {
+            $db->rollback();
+            jsend(false, 'A reason (min 5 characters) is required when cancelling statements.');
+        }
+
+        $cancel_note = 'Auto-cancelled by ' . $user['name'] .
+                       ' on delete of upload "' . $upload['filename'] . '" (#' . $upload_id . '). ' .
+                       'Reason: ' . $reason;
+
+        $upd = $db->prepare("
+            UPDATE statements
+               SET status = 'cancelled',
+                   notes  = CONCAT(COALESCE(notes,''), '\nCANCELLED: ', ?)
+             WHERE id = ?
+               AND status IN ('draft','final','reviewed')
+        ");
+        foreach ($impact['statements'] as $s) {
+            $sid = (int)$s['id'];
+            $upd->bind_param('si', $cancel_note, $sid);
+            $upd->execute();
+            $cancelled_no[] = $s['statement_no'];
+
+            // One audit row per statement, so each cancellation
+            // is independently traceable in the audit log.
+            audit_log(
+                (int)$user['id'],
+                'DATA_EDIT',
+                "Cancelled statement #{$s['statement_no']} (cascade from upload delete #$upload_id): $reason"
+            );
+        }
+        $upd->close();
+    }
+
+    // 11b. Unlink any matched receipts that point at sales we're
+    //      deleting, so we never leave dangling matched_sale_id refs.
     $db->query("
         UPDATE receipts
-           SET matched_sale_id = NULL,
-               matched_policy  = NULL,
-               match_status    = 'pending',
+           SET matched_sale_id  = NULL,
+               matched_policy   = NULL,
+               match_status     = 'pending',
                match_confidence = NULL
          WHERE matched_sale_id IN (
-             SELECT id FROM (SELECT id FROM sales WHERE upload_id = {$upload_id}) AS s
+             SELECT id FROM (SELECT id FROM sales WHERE upload_id = $upload_id) AS s
          )
     ");
 
-    $db->query("DELETE FROM sales          WHERE upload_id = {$upload_id}");
-    $db->query("DELETE FROM receipts       WHERE upload_id = {$upload_id}");
-    $db->query("DELETE FROM upload_history WHERE id        = {$upload_id}");
+    // 11c. Delete the data
+    $db->query("DELETE FROM sales          WHERE upload_id = $upload_id");
+    $db->query("DELETE FROM receipts       WHERE upload_id = $upload_id");
+    $db->query("DELETE FROM upload_history WHERE id        = $upload_id");
 
-    // Audit log INSIDE the transaction. Use 'DATA_EDIT' because
-    // it is already a valid value in the audit_log.action_type
-    // ENUM. Do NOT use 'DELETE_UPLOAD' until the schema has been
-    // migrated to allow that value.
+    // 11d. Audit the delete itself
     $detail = "Deleted upload: {$upload['filename']} ({$sales_cnt} sales, {$rec_cnt} receipts)";
-    $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '';
-    $uid = (int)$user['id'];
-    $a = $db->prepare("
-        INSERT INTO audit_log (user_id, action_type, detail, ip_address, result, created_at)
-        VALUES (?, 'DATA_EDIT', ?, ?, 'success', NOW())
-    ");
-    $a->bind_param('iss', $uid, $detail, $ip);
-    $a->execute();
-    $a->close();
+    if (!empty($cancelled_no)) {
+        $detail .= '. Cascade-cancelled statements: ' . implode(', ', $cancelled_no);
+    }
+    audit_log((int)$user['id'], 'DATA_EDIT', $detail);
 
     $db->commit();
 
-    jsend(true, "Deleted {$upload['filename']} — removed {$sales_cnt} sales and {$rec_cnt} receipts.");
+    // Build a friendly success message
+    $msg = "Deleted {$upload['filename']} — removed {$sales_cnt} sales and {$rec_cnt} receipts";
+    if (!empty($cancelled_no)) {
+        $msg .= ' and cancelled ' . count($cancelled_no) . ' statement(s)';
+    }
+    $msg .= '.';
+
+    jsend(true, $msg, array(
+        'cancelled_statements' => $cancelled_no,
+    ));
+
 } catch (Exception $e) {
     $db->rollback();
     jsend(false, 'Delete failed: ' . $e->getMessage());
