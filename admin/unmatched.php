@@ -45,10 +45,17 @@ $date_to   = $dt_ts ? date('Y-m-d', $dt_ts) : date('Y-m-t');
 // Whitelist enum-like GET params before they reach SQL/branching logic
 // — even one query that drops the escape would otherwise turn these into
 // an injection vector. Default to a known-safe value when invalid.
-$tab     = in_array($_GET['tab']     ?? '', array('receipts','sales','excluded','debits','currency_review'), true) ? $_GET['tab']     : 'receipts';
-$status  = in_array($_GET['status']  ?? '', array('all','pending','variance'), true)                            ? $_GET['status']  : 'all';
-$age     = in_array($_GET['age']     ?? '', array('all','fresh','aging','stale'), true)                         ? $_GET['age']     : 'all';
-$channel = in_array($_GET['channel'] ?? '', array('','Bank POS','iPOS','EcoCash','Zimswitch','Broker'), true)   ? $_GET['channel'] : '';
+$raw_tab     = $_GET['tab']     ?? '';
+$tab         = in_array($raw_tab,     ['receipts','sales','excluded','debits','currency_review'], true) ? $raw_tab     : 'receipts';
+
+$raw_status  = $_GET['status']  ?? '';
+$status      = in_array($raw_status,  ['all','pending','variance'], true)                               ? $raw_status  : 'all';
+
+$raw_age     = $_GET['age']     ?? '';
+$age         = in_array($raw_age,     ['all','fresh','aging','stale'], true)                            ? $raw_age     : 'all';
+
+$raw_channel = $_GET['channel'] ?? '';
+$channel     = in_array($raw_channel, ['','Bank POS','iPOS','EcoCash','Zimswitch','Broker'], true)      ? $raw_channel : '';
 $q         = trim($_GET['q'] ?? '');
 $page      = max(1, (int)($_GET['page'] ?? 1));
 $per_page  = 10;
