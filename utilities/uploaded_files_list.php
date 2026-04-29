@@ -188,15 +188,15 @@ $s_stmt->close();
           a reason, and confirms → calls delete_upload.php?mode=force
           which cascade-cancels the statements then deletes the upload.
      ============================================================ -->
-<div id="delete-modal" class="del-modal" style="display:none">
-  <div class="del-modal-backdrop" onclick="closeDeleteModal()"></div>
-  <div class="del-modal-card" role="dialog" aria-modal="true" aria-labelledby="del-title">
-    <div class="del-modal-header">
+<div id="del-dialog" class="del-dialog" style="display:none">
+  <div class="del-dialog-backdrop" onclick="closeDeleteModal()"></div>
+  <div class="del-dialog-card" role="dialog" aria-modal="true" aria-labelledby="del-title">
+    <div class="del-dialog-header">
       <h3 id="del-title" style="margin:0">Delete upload</h3>
-      <button type="button" class="del-modal-x" onclick="closeDeleteModal()" aria-label="Close">×</button>
+      <button type="button" class="del-dialog-x" onclick="closeDeleteModal()" aria-label="Close">×</button>
     </div>
 
-    <div class="del-modal-body">
+    <div class="del-dialog-body">
       <div id="del-loading" class="dim">Checking impact…</div>
 
       <div id="del-content" style="display:none">
@@ -239,7 +239,7 @@ $s_stmt->close();
       </div>
     </div>
 
-    <div class="del-modal-footer">
+    <div class="del-dialog-footer">
       <button type="button" class="btn btn-ghost" onclick="closeDeleteModal()">Cancel</button>
       <button type="button" id="del-confirm-btn" class="btn btn-danger" onclick="confirmDelete()" disabled>
         Delete
@@ -249,15 +249,15 @@ $s_stmt->close();
 </div>
 
 <style>
-.del-modal { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh; z-index:100000;
+.del-dialog { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh; z-index:100000;
              display:flex; align-items:center; justify-content:center; }
-.del-modal-backdrop { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh; background:rgba(0,0,0,0.55); }
-.del-modal-card { position:relative; background:#fff; border-radius:8px; width:520px; max-width:92vw; max-height:88vh;
+.del-dialog-backdrop { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh; background:rgba(0,0,0,0.55); }
+.del-dialog-card { position:relative; background:#fff; border-radius:8px; width:520px; max-width:92vw; max-height:88vh;
                   display:flex; flex-direction:column; box-shadow:0 10px 40px rgba(0,0,0,0.25); }
-.del-modal-header { display:flex; justify-content:space-between; align-items:center; padding:14px 18px; border-bottom:1px solid #eee; }
-.del-modal-x { background:none; border:none; font-size:24px; line-height:1; cursor:pointer; color:#666; }
-.del-modal-body { padding:16px 18px; overflow-y:auto; flex:1; font-size:13px; }
-.del-modal-footer { padding:12px 18px; border-top:1px solid #eee; display:flex; justify-content:flex-end; gap:8px; }
+.del-dialog-header { display:flex; justify-content:space-between; align-items:center; padding:14px 18px; border-bottom:1px solid #eee; }
+.del-dialog-x { background:none; border:none; font-size:24px; line-height:1; cursor:pointer; color:#666; }
+.del-dialog-body { padding:16px 18px; overflow-y:auto; flex:1; font-size:13px; }
+.del-dialog-footer { padding:12px 18px; border-top:1px solid #eee; display:flex; justify-content:flex-end; gap:8px; }
 .del-counts { display:flex; gap:18px; flex-wrap:wrap; padding:10px 12px; background:#f7f7f9; border-radius:6px; margin:10px 0; align-items:center; }
 .del-num { font-weight:700; font-size:18px; color:#333; }
 .del-warn { color:#c0392b; }
@@ -297,7 +297,7 @@ var _del_state = {
 // stayed visible and the page underneath looked broken.
 // Reparenting to body puts it at the top of the stack.
 (function () {
-  var modal = document.getElementById('delete-modal');
+  var modal = document.getElementById('del-dialog');
   if (modal && modal.parentNode !== document.body) {
     document.body.appendChild(modal);
   }
@@ -321,7 +321,7 @@ function deleteFile(id, filename) {
   document.getElementById('del-reason').value = '';
   document.getElementById('del-confirm-btn').disabled = true;
   document.getElementById('del-confirm-btn').textContent = 'Delete';
-  document.getElementById('delete-modal').style.display = 'flex';
+  document.getElementById('del-dialog').style.display = 'flex';
 
   // Step 1: ask the server what would happen
   var body = 'upload_id=' + encodeURIComponent(id) +
@@ -416,7 +416,7 @@ function toggleStmtList() {
 }
 
 function closeDeleteModal() {
-  document.getElementById('delete-modal').style.display = 'none';
+  document.getElementById('del-dialog').style.display = 'none';
 }
 
 function confirmDelete() {
@@ -488,7 +488,7 @@ function esc(v) {
 
 // Esc key closes the modal
 document.addEventListener('keydown', function (e) {
-  if (e.key === 'Escape' && document.getElementById('delete-modal').style.display === 'flex') {
+  if (e.key === 'Escape' && document.getElementById('del-dialog').style.display === 'flex') {
     closeDeleteModal();
   }
 });
