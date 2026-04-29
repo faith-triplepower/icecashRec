@@ -18,8 +18,13 @@ $error   = htmlspecialchars($_GET['error']   ?? '');
 // Filters — whitelist enum values defensively. $filter_assigned can also
 // be a numeric user id, so allow integers in addition to the named modes.
 $filter_status   = in_array($_GET['filter']   ?? '', array('pending','reviewed','resolved','dismissed','all'), true) ? $_GET['filter']   : 'pending';
-$filter_priority = in_array($_GET['priority'] ?? '', array('','low','medium','high','critical'), true)               ? $_GET['priority'] : '';
-$filter_type     = in_array($_GET['type']     ?? '', array('','variance','unmatched','currency_mismatch','manual'), true) ? $_GET['type'] : '';
+$raw_priority    = $_GET['priority'] ?? '';
+$filter_priority = in_array($raw_priority, ['','low','medium','high','critical'], true)
+                    ? $raw_priority : '';
+
+$raw_type        = $_GET['type'] ?? '';
+$filter_type     = in_array($raw_type, ['','variance','unmatched','currency_mismatch','manual'], true)
+                    ? $raw_type : '';
 $raw_assigned    = $_GET['assigned'] ?? 'mine';
 $filter_assigned = (in_array($raw_assigned, array('mine','all','unassigned'), true) || ctype_digit((string)$raw_assigned))
                     ? $raw_assigned : 'mine';
