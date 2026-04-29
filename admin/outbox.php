@@ -69,7 +69,7 @@ foreach (array('pending','sent','failed','skipped') as $s) {
 <?php if ($error):   ?><div class="alert alert-danger">⚠ <?= $error ?></div><?php endif; ?>
 
 <div class="alert alert-warn" style="font-size:12px">
-  <strong>ℹ SMTP not configured?</strong> Messages remain in <em>pending</em> or move to <em>failed</em> after 3 attempts. They're still a live audit of what the system wanted to send, so you can treat this as an in-app inbox until mail delivery is wired. When SMTP is set up, clicking "Run Queue Now" will attempt delivery.
+  <strong>ℹ SMTP not configured?</strong> Messages stay <em>pending</em> or turn <em>failed</em> after 3 attempts. Treat this as an in-app inbox until mail delivery is wired. Once SMTP is set, click "Run Queue Now" to send.
 </div>
 
 <div class="stat-grid">
