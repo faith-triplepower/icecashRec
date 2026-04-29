@@ -590,7 +590,7 @@ function link_with($extra) {
           <?php if ($tab === 'debits'): ?>
             <span class="dim" style="font-size:11px">—</span>
           <?php elseif ($tab !== 'excluded'): ?>
-          <button class="btn btn-primary btn-sm" onclick="openMatchModal(<?= $r['id'] ?>, '<?= addslashes($r['reference_no']) ?>', <?= $r['amount'] ?>, '<?= $r['currency'] ?>')"><i class="fa-solid fa-wand-magic-sparkles"></i> Match</button>
+          <button class="btn btn-primary btn-sm" onclick="openMatchModal(<?= $r['id'] ?>, '<?= addslashes($r['reference_no']) ?>', <?= $r['amount'] ?>, '<?= $r['currency'] ?>', '<?= addslashes($r['txn_date']) ?>')"><i class="fa-solid fa-wand-magic-sparkles"></i> Match</button>
           <button class="btn btn-ghost btn-sm" onclick="openExcludeModal(<?= $r['id'] ?>, '<?= addslashes($r['reference_no']) ?>')">Exclude</button>
           <button class="btn btn-ghost btn-sm" onclick="openEscalateModal(<?= $r['id'] ?>, '<?= addslashes($r['reference_no']) ?>')">Escalate</button>
           <?php endif; ?>
@@ -630,8 +630,14 @@ function link_with($extra) {
     <div style="padding:20px">
       <div style="background:#f5f5f5;padding:14px;border-radius:4px;margin-bottom:16px">
         <div style="font-size:11px;color:#888;font-weight:600;margin-bottom:4px">RECEIPT</div>
-        <div style="display:flex;justify-content:space-between">
-          <div><strong id="match_ref" style="font-family:monospace"></strong></div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <strong id="match_ref" style="font-family:monospace"></strong>
+            <div style="font-size:11px;color:#666;margin-top:2px">
+              <i class="fa-regular fa-calendar"></i>
+              Paid on <span id="match_date" style="font-weight:600;color:#333"></span>
+            </div>
+          </div>
           <div><strong id="match_amt" style="font-family:monospace"></strong></div>
         </div>
       </div>
@@ -748,10 +754,11 @@ function link_with($extra) {
 </style>
 
 <script>
-function openMatchModal(receiptId, ref, amount, currency) {
+function openMatchModal(receiptId, ref, amount, currency, txnDate) {
   document.getElementById('match_receipt_id').value = receiptId;
   document.getElementById('match_ref').textContent = ref;
   document.getElementById('match_amt').textContent = currency + ' ' + parseFloat(amount).toLocaleString(undefined, {minimumFractionDigits:2});
+  document.getElementById('match_date').textContent = formatReceiptDate(txnDate);
   document.getElementById('match_sales_id').value = '';
   document.getElementById('match-submit-btn').disabled = true;
   document.getElementById('suggestions').innerHTML = '<em class="dim">Loading smart suggestions…</em>';
@@ -759,11 +766,33 @@ function openMatchModal(receiptId, ref, amount, currency) {
 
   fetch('../process/process_unmatched.php?action=suggest&receipt_id=' + receiptId)
     .then(r => r.json())
-    .then(renderSuggestions)
+    .then(function (data) { renderSuggestions(data, txnDate); })
     .catch(e => { document.getElementById('suggestions').innerHTML = '<div style="color:#c0392b">Failed: ' + e + '</div>'; });
 }
 
-function renderSuggestions(data) {
+// Formats "2026-03-15" → "Sun, 15 Mar 2026" so the user sees both
+// the day-of-week (helps spot weekend-vs-weekday mistakes) and the
+// human month name. Falls back to the raw string if parsing fails.
+function formatReceiptDate(d) {
+  if (!d) return '—';
+  var dt = new Date(d + 'T00:00:00');
+  if (isNaN(dt.getTime())) return d;
+  return dt.toLocaleDateString('en-GB', {
+    weekday: 'short', day: '2-digit', month: 'short', year: 'numeric'
+  });
+}
+
+// Returns the day-gap between the receipt date and a candidate sale date.
+// Used to colour-code suggestions: same-day matches are strongest.
+function dayDiff(a, b) {
+  if (!a || !b) return null;
+  var da = new Date(a + 'T00:00:00');
+  var db = new Date(b + 'T00:00:00');
+  if (isNaN(da.getTime()) || isNaN(db.getTime())) return null;
+  return Math.round((db - da) / (1000 * 60 * 60 * 24));
+}
+
+function renderSuggestions(data, receiptDate) {
   const box = document.getElementById('suggestions');
   if (!data.candidates || data.candidates.length === 0) {
     box.innerHTML = '<div class="dim">No candidate sales found within ±7 days and ±5% amount. Try manual entry via another tool.</div>';
@@ -774,10 +803,31 @@ function renderSuggestions(data) {
     const score = c.confidence_score;
     const cls = score >= 80 ? 'conf-high' : (score >= 50 ? 'conf-med' : 'conf-low');
     const reasons = (c.match_reasons || []).map(r => '<span class="reason-tag">' + r + '</span>').join('');
+
+    // Day-gap badge: shows how far off the sale date is from the
+    // receipt date. Same-day = green, ±1-2 days = amber, more = red.
+    var gap = dayDiff(receiptDate, c.txn_date);
+    var gapHtml = '';
+    if (gap !== null) {
+      var gapTxt;
+      if (gap === 0)         gapTxt = 'same day';
+      else if (gap === 1)    gapTxt = '+1 day';
+      else if (gap === -1)   gapTxt = '-1 day';
+      else if (gap > 0)      gapTxt = '+' + gap + ' days';
+      else                   gapTxt = gap + ' days';
+      var gapColor = (gap === 0) ? '#1e7e34'
+                   : (Math.abs(gap) <= 2) ? '#d49a00'
+                   : '#c0392b';
+      gapHtml = '<span style="display:inline-block;background:#fff;border:1px solid '
+              + gapColor + ';color:' + gapColor
+              + ';padding:1px 6px;border-radius:2px;font-size:10px;font-weight:600;margin-left:6px">'
+              + gapTxt + '</span>';
+    }
+
     html += '<div class="suggestion-row" data-id="' + c.id + '" onclick="selectSuggestion(this,' + c.id + ')">'
          +  '  <div style="flex:1">'
          +  '    <div style="font-family:monospace;font-weight:600">' + c.policy_number + '</div>'
-         +  '    <div style="font-size:11px;color:#666">' + c.agent_name + ' · ' + c.payment_method + ' · ' + c.txn_date + '</div>'
+         +  '    <div style="font-size:11px;color:#666">' + c.agent_name + ' · ' + c.payment_method + ' · ' + c.txn_date + gapHtml + '</div>'
          +  '    <div style="margin-top:4px">' + reasons + '</div>'
          +  '  </div>'
          +  '  <div style="text-align:right">'
