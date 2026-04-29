@@ -249,8 +249,9 @@ $s_stmt->close();
 </div>
 
 <style>
-.del-modal { position:fixed; inset:0; z-index:9999; display:flex; align-items:center; justify-content:center; }
-.del-modal-backdrop { position:absolute; inset:0; background:rgba(0,0,0,0.45); }
+.del-modal { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh; z-index:100000;
+             display:flex; align-items:center; justify-content:center; }
+.del-modal-backdrop { position:fixed; top:0; left:0; right:0; bottom:0; width:100vw; height:100vh; background:rgba(0,0,0,0.55); }
 .del-modal-card { position:relative; background:#fff; border-radius:8px; width:520px; max-width:92vw; max-height:88vh;
                   display:flex; flex-direction:column; box-shadow:0 10px 40px rgba(0,0,0,0.25); }
 .del-modal-header { display:flex; justify-content:space-between; align-items:center; padding:14px 18px; border-bottom:1px solid #eee; }
@@ -287,6 +288,20 @@ var _del_state = {
   canForce: false,
   csrf: '<?= csrf_token() ?>'
 };
+
+// ─── Move the modal to <body> on first load ───────────────────
+// The page renders inside #page-inner which is a constrained
+// content column next to the sidebar. A position:fixed modal
+// nested inside that column has its backdrop clipped by the
+// parent's stacking context, which is why the sidebar/header
+// stayed visible and the page underneath looked broken.
+// Reparenting to body puts it at the top of the stack.
+(function () {
+  var modal = document.getElementById('delete-modal');
+  if (modal && modal.parentNode !== document.body) {
+    document.body.appendChild(modal);
+  }
+})();
 
 // Triggered by the trash icon in the file list
 function deleteFile(id, filename) {
