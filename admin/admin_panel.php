@@ -118,7 +118,7 @@ $db_size = $db_size_row ? $db_size_row['size_mb'] : '?';
     <div class="panel">
         <div class="panel-header">
             <span class="panel-title">Users by Role</span>
-            <a href="/icecashRec/admin/users.php" class="btn btn-ghost btn-sm" style="margin-left:auto">Manage Users &rarr;</a>
+            <a href="<?= BASE_URL ?>/admin/users.php" class="btn btn-ghost btn-sm" style="margin-left:auto">Manage Users &rarr;</a>
         </div>
         <table class="data-table">
             <thead><tr><th>Role</th><th>Total</th><th>Active</th><th>Inactive</th></tr></thead>
@@ -263,7 +263,7 @@ $db_size = $db_size_row ? $db_size_row['size_mb'] : '?';
     <div class="panel">
         <div class="panel-header">
             <span class="panel-title">System Settings</span>
-            <a href="/icecashRec/admin/settings.php" class="btn btn-ghost btn-sm" style="margin-left:auto">Edit &rarr;</a>
+            <a href="<?= BASE_URL ?>/admin/settings.php" class="btn btn-ghost btn-sm" style="margin-left:auto">Edit &rarr;</a>
         </div>
         <table class="data-table">
             <thead><tr><th>Key</th><th>Value</th><th>Updated</th></tr></thead>
@@ -283,11 +283,11 @@ $db_size = $db_size_row ? $db_size_row['size_mb'] : '?';
     <div class="panel">
         <div class="panel-header"><span class="panel-title">Quick Actions</span></div>
         <div class="panel-body" style="display:flex;flex-direction:column;gap:8px">
-            <a href="/icecashRec/admin/users.php"      class="btn btn-ghost"><i class="fa-solid fa-users"></i> Manage All Users</a>
-            <a href="/icecashRec/admin/audit.php"       class="btn btn-ghost"><i class="fa-solid fa-clock-rotate-left"></i> View Full Audit Log</a>
-            <a href="/icecashRec/admin/agents.php"      class="btn btn-ghost"><i class="fa-solid fa-building"></i> Manage Agents</a>
-            <a href="/icecashRec/admin/settings.php"    class="btn btn-ghost"><i class="fa fa-cogs"></i> System Settings</a>
-            <a href="/icecashRec/process/process_export.php?type=audit" class="btn btn-ghost" target="_blank">
+            <a href="<?= BASE_URL ?>/admin/users.php"      class="btn btn-ghost"><i class="fa-solid fa-users"></i> Manage All Users</a>
+            <a href="<?= BASE_URL ?>/admin/audit.php"       class="btn btn-ghost"><i class="fa-solid fa-clock-rotate-left"></i> View Full Audit Log</a>
+            <a href="<?= BASE_URL ?>/admin/agents.php"      class="btn btn-ghost"><i class="fa-solid fa-building"></i> Manage Agents</a>
+            <a href="<?= BASE_URL ?>/admin/settings.php"    class="btn btn-ghost"><i class="fa fa-cogs"></i> System Settings</a>
+            <a href="<?= BASE_URL ?>/process/process_export.php?type=audit" class="btn btn-ghost" target="_blank">
                 <i class="fa-solid fa-print"></i> Print Audit Log (PDF)
             </a>
         </div>

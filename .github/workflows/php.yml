@@ -1,0 +1,133 @@
+name: Deploy to main staging
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+
+  # ─── Stage 1: Validate ────────────────────────────────────────────────────
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PHP syntax
+        run: |
+          echo ">>> Checking PHP syntax on changed files..."
+          find . \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -not -path './vendor/*' \
+            -name '*.php' \
+            -print0 | xargs -0 -n1 php -l
+          echo ">>> PHP syntax check passed"
+
+      - name: Detect changed files
+        id: changes
+        run: |
+          PREV_SHA=$(git log --format="%H" -n 2 | tail -1)
+          CHANGED=$(git diff --name-only "$PREV_SHA" HEAD -- . \
+            ':!.git' ':!.github' ':!.env' ':!assets' ':!base/assets' ':!assets/**' \
+            ':!.htaccess' ':!func/connect.php' ':!.idea' ':!logs' \
+            ':!node_modules' ':!README.md' ':!sql' \
+            | wc -l)
+          echo "changed_count=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo ">>> $CHANGED deployable file(s) changed"
+
+  # ─── Stage 2: Deploy ──────────────────────────────────────────────────────
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: staging
+    env:
+      FTP_HOST: ${{ secrets.STAGING_FTP_HOST }}
+      FTP_USER: ${{ secrets.STAGING_FTP_USER }}
+      FTP_PASS: ${{ secrets.STAGING_FTP_PASS }}
+      REMOTE_DIR: /zgi/icecash-recon
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install lftp
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lftp
+
+      - name: Upload changed files to FTP
+        run: |
+          echo ">>> Connecting to $FTP_HOST..."
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" \
+            -e "
+              set ssl:verify-certificate no;
+              set ftp:passive-mode yes;
+              set net:timeout 60;
+              set net:max-retries 3;
+              set net:reconnect-interval-base 5;
+              set cmd:fail-exit yes;
+              set mirror:parallel-transfer-count 5;
+              set mirror:parallel-directories true;
+              set net:connection-limit 10;
+              set ftp:use-mdtm off;
+              set ftp:use-size off;
+              echo '>>> Starting parallel upload...';
+              mirror -R --only-newer --verbose \
+                --parallel=5 \
+                --use-cache \
+                --no-perms \
+                --exclude .git \
+                --exclude .github \
+                --exclude .env \
+                --exclude assets \
+                --exclude base/assets \
+                --exclude vendor \
+                --exclude .htaccess \
+                --exclude func/connect.php \
+                --exclude .idea \
+                --exclude logs \
+                --exclude node_modules \
+                --exclude README.md \
+                --exclude-glob sql \
+                . $REMOTE_DIR;
+              echo '>>> Upload complete!';
+              bye
+            "
+
+  # ─── Stage 3: Post-Deploy ─────────────────────────────────────────────────
+  post-deploy:
+    name: Post-Deploy
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always()
+    steps:
+      - name: Deployment successful
+        if: needs.deploy.result == 'success'
+        run: |
+          echo "## Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Server | ${{ secrets.STAGING_FTP_HOST }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Remote Dir | /icecash-recon |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment failed
+        if: needs.deploy.result == 'failure'
+        run: |
+          echo "## Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Check the Deploy job logs above for details." >> $GITHUB_STEP_SUMMARY
+          exit 1

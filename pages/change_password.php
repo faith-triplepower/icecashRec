@@ -16,6 +16,10 @@ $expired = isset($_GET['expired']);
 $error   = '';
 $success = '';
 
+// Read org-configured min length once — used by both form rendering and validation
+$min_row = $db->query("SELECT setting_value FROM system_settings WHERE setting_key='password_min_length'")->fetch_assoc();
+$min_len = $min_row ? max(6, (int)$min_row['setting_value']) : 8;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $current  = trim($_POST['current_password'] ?? '');
@@ -31,8 +35,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$row || !password_verify($current, $row['password_hash'])) {
         $error = 'Current password is incorrect.';
-    } elseif (strlen($new_pass) < 8) {
-        $error = 'New password must be at least 8 characters.';
+    } elseif (strlen($new_pass) < $min_len) {
+        $error = "New password must be at least $min_len characters.";
+    } elseif (!preg_match('/[A-Za-z]/', $new_pass) || !preg_match('/[0-9]/', $new_pass)) {
+        $error = 'Password must contain at least one letter and one number.';
     } elseif ($new_pass !== $confirm) {
         $error = 'New passwords do not match.';
     } elseif (password_was_reused($db, $uid, $new_pass, 5)) {
@@ -77,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="error-msg"><?= htmlspecialchars($error) ?></div>
         <?php endif; ?>
         <input type="password" name="current_password" placeholder="Current Password" required autofocus>
-        <input type="password" name="new_password" placeholder="New Password (min 8 chars)" required minlength="8">
+        <input type="password" name="new_password" placeholder="New Password (min <?= $min_len ?? 8 ?> chars, letter + number)" required minlength="<?= $min_len ?? 8 ?>">
         <input type="password" name="confirm_password" placeholder="Confirm New Password" required minlength="8">
         <button type="submit"><span class="state">Change Password</span></button>
         <?php if (!$expired): ?>

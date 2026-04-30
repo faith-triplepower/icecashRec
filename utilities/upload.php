@@ -141,6 +141,16 @@ $alert_style = 'white-space:pre-line;align-items:flex-start';
             <?php endforeach; ?>
           </datalist>
         </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Period From</label>
+            <input type="date" name="period_from" class="form-input" value="<?= date('Y-m-01') ?>">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Period To</label>
+            <input type="date" name="period_to" class="form-input" value="<?= date('Y-m-d') ?>">
+          </div>
+        </div>
         <div class="upload-zone" onclick="document.getElementById('rec-file').click()" id="rec-zone">
           <div class="upload-icon">⬆</div>
           <div class="upload-text">Drop files here or <strong>click to browse</strong></div>

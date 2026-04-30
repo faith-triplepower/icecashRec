@@ -85,9 +85,14 @@ $txn_match_rate = ($run['match_rate'] !== null) ? number_format($run['match_rate
     <div class="stat-value"><?= $variance ?></div>
     <div class="stat-sub">With Variances</div>
   </div>
-  <div class="stat-card blue">
-    <div class="stat-value"><?= $txn_match_rate ?>%</div>
-    <div class="stat-sub">Match Rate</div>
+  <div class="stat-card blue" style="cursor:pointer" onclick="window.location='matched_receipts.php?run_id=<?= $run_id ?>'" title="View matched pairs">
+    <div class="stat-value">
+      <?= $run['matched_count'] ?? '—' ?> <span style="font-size:12px;color:#888">/ <?= $run['total_receipts'] ?? '?' ?></span>
+      <?php if ($run['match_rate'] !== null): ?>
+      <span style="font-size:13px;font-weight:600;color:#0066cc;margin-left:6px"><?= number_format($run['match_rate'], 1) ?>%</span>
+      <?php endif; ?>
+    </div>
+    <div class="stat-sub">Receipts Matched <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px;margin-left:4px"></i></div>
   </div>
   <div class="stat-card red">
     <div class="stat-value" title="ZWG <?= number_format($total_variance_zwg, 2) ?>"><?= fmt_compact($total_variance_zwg) ?></div>
@@ -168,9 +173,15 @@ $txn_match_rate = ($run['match_rate'] !== null) ? number_format($run['match_rate
 </div>
 
 <!-- Navigation -->
-<div style="margin-top:24px;display:flex;gap:8px">
+<div style="margin-top:24px;display:flex;gap:8px;flex-wrap:wrap">
   <a href="reconciliation.php" class="btn btn-ghost"><i class="fa-solid fa-arrow-left"></i> Back to Reconciliation</a>
   <a href="variance.php?run_id=<?= $run_id ?>" class="btn btn-ghost"><i class="fa-solid fa-chart-column"></i> View Variance Report</a>
+  <a href="matched_receipts.php?run_id=<?= $run_id ?>" class="btn btn-ghost" style="font-weight:700;color:#0066cc;border-color:#0066cc">
+    <i class="fa-solid fa-link"></i> View Matched Pairs
+    <?php if (!empty($run['matched_count'])): ?>
+    <span style="background:#0066cc;color:#fff;border-radius:10px;padding:1px 8px;margin-left:6px;font-size:10px"><?= (int)$run['matched_count'] ?></span>
+    <?php endif; ?>
+  </a>
 </div>
 
 <?php require_once '../layouts/layout_footer.php'; ?>

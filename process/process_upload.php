@@ -44,8 +44,8 @@ $uid  = (int)$user['id'];
 $file_type   = isset($_POST['file_type'])   ? $_POST['file_type']   : '';
 $report_type = isset($_POST['report_type']) ? $_POST['report_type'] : '';
 $source_name = isset($_POST['source_name']) ? $_POST['source_name'] : '';
-$period_from = !empty($_POST['period_from']) ? $_POST['period_from'] : null;
-$period_to   = !empty($_POST['period_to'])   ? $_POST['period_to']   : null;
+$period_from = !empty($_POST['period_from']) ? $_POST['period_from'] : '';
+$period_to   = !empty($_POST['period_to'])   ? $_POST['period_to']   : '';
 
 // ── Validate inputs ──────────────────────────────────────────
 if (!in_array($file_type, ['Sales', 'Receipts'])) {

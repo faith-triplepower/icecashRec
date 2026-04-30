@@ -27,7 +27,11 @@ if (!$upload_id) {
 
 // Get upload details
 $upload = $db->query("
-    SELECT uh.*, u.full_name, u.email AS uploader_email,
+    SELECT uh.id, uh.filename, uh.file_type, uh.report_type, uh.source_name, 
+           uh.period_from, uh.period_to, uh.upload_status, uh.record_count,
+           uh.validation_msg, uh.flag_status, uh.flag_reason, uh.flag_note,
+           uh.flagged_at, uh.uploaded_by, uh.created_at,
+           u.full_name, u.email AS uploader_email,
            fb.full_name AS flagged_by_name
     FROM upload_history uh
     JOIN users u ON uh.uploaded_by = u.id
@@ -134,17 +138,33 @@ if ($upload['file_type'] === 'Sales') {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Period From</label>
+        <?php if ($can_upload): ?>
+        <input type="date" id="period_from" class="form-input" value="<?= htmlspecialchars($upload['period_from'] ?? '') ?>">
+        <?php else: ?>
         <input type="text" class="form-input" value="<?= htmlspecialchars($upload['period_from'] ?? '') ?>" readonly>
+        <?php endif; ?>
       </div>
       <div class="form-group">
         <label class="form-label">Period To</label>
+        <?php if ($can_upload): ?>
+        <input type="date" id="period_to" class="form-input" value="<?= htmlspecialchars($upload['period_to'] ?? '') ?>">
+        <?php else: ?>
         <input type="text" class="form-input" value="<?= htmlspecialchars($upload['period_to'] ?? '') ?>" readonly>
+        <?php endif; ?>
       </div>
       <div class="form-group">
         <label class="form-label">Records Imported</label>
         <input type="text" class="form-input" value="<?= number_format($upload['record_count'] ?? 0) ?>" readonly>
       </div>
     </div>
+    <?php if ($can_upload): ?>
+    <div style="margin-top:4px">
+      <button type="button" id="save-period-btn" class="btn btn-primary btn-sm">
+        <i class="fa-solid fa-floppy-disk"></i> Save Period
+      </button>
+      <span id="save-period-msg" style="margin-left:10px;font-size:12px;display:none"></span>
+    </div>
+    <?php endif; ?>
 
     <div style="background:#f9f9f9;border-left:3px solid <?= $upload['upload_status']==='ok'?'#00a950':($upload['upload_status']==='warning'?'#f39c12':'#c0392b') ?>;padding:12px;border-radius:3px;margin-top:16px">
       <strong>Status:</strong> 
@@ -261,6 +281,49 @@ if ($upload['file_type'] === 'Sales') {
 <?php endif; ?>
 
 <script>
+<?php if ($can_upload): ?>
+document.getElementById('save-period-btn').addEventListener('click', function () {
+    var btn = this;
+    var msg = document.getElementById('save-period-msg');
+    var from = document.getElementById('period_from').value;
+    var to   = document.getElementById('period_to').value;
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    msg.style.display = 'none';
+
+    var body = new URLSearchParams();
+    body.append('upload_id',   '<?= $upload_id ?>');
+    body.append('period_from', from);
+    body.append('period_to',   to);
+    body.append('_csrf',       '<?= csrf_token() ?>');
+
+    fetch('../process/process_upload_period.php', {
+        method: 'POST', body: body, credentials: 'same-origin'
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save Period';
+        msg.style.display = 'inline';
+        if (data.ok) {
+            msg.style.color = '#00a950';
+            msg.textContent = 'Saved.';
+        } else {
+            msg.style.color = '#c0392b';
+            msg.textContent = data.error || 'Save failed.';
+        }
+        setTimeout(function () { msg.style.display = 'none'; }, 3000);
+    })
+    .catch(function () {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save Period';
+        msg.style.display = 'inline';
+        msg.style.color = '#c0392b';
+        msg.textContent = 'Network error.';
+    });
+});
+<?php endif; ?>
 <?php if ($can_flag): ?>
 function openFlagModal() {
   document.getElementById('flag-modal').style.display = 'flex';

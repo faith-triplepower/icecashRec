@@ -20,7 +20,7 @@ require_once '../layouts/layout_header.php';
     </div>
   </div>
   
-  <a href="/icecashRec/modules/dashboard.php" class="btn btn-primary">← Back to Dashboard</a>
+  <a href="<?= BASE_URL ?>/modules/dashboard.php" class="btn btn-primary">← Back to Dashboard</a>
 </div>
 
 <?php require_once '../layouts/layout_footer.php'; ?>

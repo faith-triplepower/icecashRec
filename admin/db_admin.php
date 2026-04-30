@@ -1,250 +1,208 @@
 <?php
 // ============================================================
-// admin/db_admin.php — Admin-only database migration runner.
+// admin/db_admin.php — Test-data management tools.
 //
-// Lists every .sql file in /sql/ and lets an Admin preview / run
-// them with one click. Built for environments where the developer
-// can push to git but doesn't have direct DB credentials.
+// Only the two explicitly whitelisted scripts below are exposed.
+// The full schema, migrations, and any other SQL files are NOT
+// listed, NOT previewable, and NOT runnable from here — they
+// must be applied directly by a DBA with server access.
 //
 // Security:
-//   - require_role('Admin')                — Managers cannot reach this
-//   - filename whitelist (basename only, must end .sql, must exist)
-//   - destructive files (matching DESTRUCTIVE_PATTERNS) need an
-//     extra typed confirmation
+//   - require_role('Admin')   — Managers cannot reach this page
+//   - Explicit file whitelist — no directory scanning at all
 //   - CSRF token on every run
-//   - audit_log entry per run with file hash + result
+//   - Typed confirmation required for destructive scripts
+//   - Every run is recorded in the audit log
 // ============================================================
 
-$page_title = 'Database Admin';
+$page_title = 'System Tools';
 $active_nav = 'admin';
 require_once '../layouts/layout_header.php';
-require_role(array('Admin'));
+require_role(['Admin']);
 
-$db   = get_db();
-$user = current_user();
-$uid  = (int)$user['id'];
+$db  = get_db();
+$uid = (int)current_user()['id'];
+
+// ── Explicit whitelist — ONLY these two files may be run ────
+// To add a new script, add its filename here AND verify it is
+// safe to run from the browser before deploying.
+$ALLOWED_FILES = [
+    'reset_test_data.sql'  => 'Full system wipe: removes agents, terminals, all transactions, reconciliation runs, preferences, and audit log. Keeps users, banks, and system settings only.',
+    'update_passwords.sql' => 'Resets test user passwords to the defaults defined in the script. Safe to run after a fresh schema install.',
+];
 
 $SQL_DIR = realpath(__DIR__ . '/../sql');
 if (!$SQL_DIR || !is_dir($SQL_DIR)) {
     die('SQL directory not found.');
 }
 
-// Files matching these substrings are flagged DESTRUCTIVE in the UI
-// (require typing the filename to confirm). Adjust as new files appear.
-$DESTRUCTIVE_PATTERNS = array('reset_', 'wipe_', 'drop_', 'truncate_', 'icecash_db.sql');
-
-function is_destructive($name, $patterns) {
-    foreach ($patterns as $p) {
-        if (stripos($name, $p) !== false) return true;
-    }
-    return false;
-}
-
-// Thin wrapper so existing call sites keep working — the actual write
-// goes through audit_log_entry() in core/auth.php so the action_type
-// ENUM is enforced in one place.
-function log_admin_action($db, $uid, $detail, $result = 'success') {
-    audit_log_entry($uid, 'DATA_EDIT', $detail, $result);
-}
-
-// ── Run a SQL file ──────────────────────────────────────────
+// ── Run a script ────────────────────────────────────────────
 $last_action = null;
-$last_output = null;
 $last_error  = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'run_sql') {
     csrf_verify();
 
-    $req_name = basename($_POST['filename'] ?? '');
+    $req_name = trim(basename($_POST['filename'] ?? ''));
     $confirm  = trim($_POST['confirm_filename'] ?? '');
 
-    // Whitelist: must be a real .sql file in /sql/
-    if (!preg_match('/^[A-Za-z0-9._-]+\.sql$/', $req_name)) {
-        $last_error = 'Invalid filename.';
+    if (!array_key_exists($req_name, $ALLOWED_FILES)) {
+        $last_error = 'That script is not available from this page.';
     } else {
         $full = $SQL_DIR . DIRECTORY_SEPARATOR . $req_name;
         if (!is_file($full)) {
-            $last_error = "File not found: $req_name";
+            $last_error = "Script file not found on disk: " . htmlspecialchars($req_name);
+        } elseif ($confirm !== $req_name) {
+            $last_error = "Name did not match — type exactly: <strong style='font-family:monospace'>" . htmlspecialchars($req_name) . "</strong> (you typed: <em>" . htmlspecialchars($confirm) . "</em>)";
         } else {
-            // Destructive files require typing the exact filename to confirm.
-            if (is_destructive($req_name, $DESTRUCTIVE_PATTERNS) && $confirm !== $req_name) {
-                $last_error = "This file is flagged as destructive. To confirm, type the filename exactly: $req_name";
-            } else {
-                $sql = file_get_contents($full);
-                $hash = substr(hash('sha256', $sql), 0, 12);
+            $sql  = file_get_contents($full);
+            $hash = substr(hash('sha256', $sql), 0, 12);
 
-                // Run the file as a multi-statement query so semicolon-
-                // separated statements all execute. Capture every result
-                // in order.
-                $output = array();
-                if ($db->multi_query($sql)) {
-                    do {
-                        if ($res = $db->store_result()) {
-                            $rows = $res->fetch_all(MYSQLI_ASSOC);
-                            $output[] = array(
-                                'kind' => 'rows',
-                                'cols' => empty($rows) ? array() : array_keys($rows[0]),
-                                'rows' => $rows,
-                            );
-                            $res->free();
-                        } else {
-                            $output[] = array(
-                                'kind'    => 'affected',
-                                'rows'    => $db->affected_rows,
-                                'info'    => $db->info ?: '',
-                            );
-                        }
-                        if (!$db->more_results()) break;
-                    } while ($db->next_result());
-                }
-                if ($db->errno) {
-                    $last_error = 'MySQL error: ' . $db->error;
-                    log_admin_action($db, $uid, "Ran SQL file '$req_name' (hash $hash) — FAILED: " . substr($db->error, 0, 150), 'failed');
-                } else {
-                    $last_action = "Ran '$req_name' (hash $hash)";
-                    $last_output = $output;
-                    log_admin_action($db, $uid, "Ran SQL file '$req_name' (hash $hash) — OK");
-                }
+            if ($db->multi_query($sql)) {
+                do {
+                    if ($res = $db->store_result()) $res->free();
+                    if (!$db->more_results()) break;
+                } while ($db->next_result());
+            }
+
+            if ($db->errno) {
+                $last_error = 'MySQL error: ' . htmlspecialchars($db->error);
+                audit_log_entry($uid, 'DATA_EDIT', "Ran '$req_name' (hash $hash) — FAILED: " . substr($db->error, 0, 150), 'failed');
+            } else {
+                $last_action = "Successfully ran '$req_name' (sha256 …$hash).";
+                audit_log_entry($uid, 'DATA_EDIT', "Ran '$req_name' (hash $hash) — OK");
             }
         }
     }
 }
-
-// ── List all .sql files ─────────────────────────────────────
-$files = array();
-foreach (scandir($SQL_DIR) as $f) {
-    if (!preg_match('/\.sql$/i', $f)) continue;
-    $full = $SQL_DIR . DIRECTORY_SEPARATOR . $f;
-    if (!is_file($full)) continue;
-    $files[] = array(
-        'name'         => $f,
-        'size'         => filesize($full),
-        'mtime'        => filemtime($full),
-        'destructive'  => is_destructive($f, $DESTRUCTIVE_PATTERNS),
-    );
-}
-usort($files, function($a, $b) { return $b['mtime'] - $a['mtime']; });
-
-// ── Preview support ─────────────────────────────────────────
-$preview_name = isset($_GET['preview']) ? basename($_GET['preview']) : '';
-$preview_content = '';
-if ($preview_name && preg_match('/^[A-Za-z0-9._-]+\.sql$/', $preview_name)) {
-    $p = $SQL_DIR . DIRECTORY_SEPARATOR . $preview_name;
-    if (is_file($p)) $preview_content = file_get_contents($p);
-}
 ?>
 
 <div class="page-header">
-  <h1>Database Admin</h1>
-  <p>Run database migrations and maintenance scripts. <strong>Admin only.</strong> Every run is recorded in the audit log.</p>
+  <h1>System Tools</h1>
+  <p>Test-data management scripts for Admin use. Schema migrations and production database files are not accessible here — contact a DBA for those.</p>
 </div>
 
 <?php if ($last_error): ?>
-<div class="alert alert-danger">⚠ <?= htmlspecialchars($last_error) ?></div>
+<div class="alert alert-danger">⚠ <?= $last_error ?></div>
 <?php endif; ?>
-
 <?php if ($last_action): ?>
 <div class="alert alert-success">✓ <?= htmlspecialchars($last_action) ?></div>
-  <?php if ($last_output): ?>
-  <div class="panel" style="margin-bottom:16px">
-    <div class="panel-header"><span class="panel-title">Output</span></div>
-    <div style="padding:12px 16px;font-family:monospace;font-size:12px">
-    <?php foreach ($last_output as $i => $o): ?>
-      <?php if ($o['kind'] === 'rows'): ?>
-        <div style="margin-bottom:8px"><strong>Result set <?= $i + 1 ?>:</strong> <?= count($o['rows']) ?> rows</div>
-        <?php if (!empty($o['rows'])): ?>
-        <table class="data-table" style="font-size:11px">
-          <thead><tr><?php foreach ($o['cols'] as $c): ?><th><?= htmlspecialchars($c) ?></th><?php endforeach; ?></tr></thead>
-          <tbody>
-            <?php foreach ($o['rows'] as $row): ?>
-            <tr><?php foreach ($o['cols'] as $c): ?><td><?= htmlspecialchars((string)($row[$c] ?? '')) ?></td><?php endforeach; ?></tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-        <?php endif; ?>
-      <?php else: ?>
-        <div>Statement <?= $i + 1 ?>: affected <?= (int)$o['rows'] ?> row(s)<?= $o['info'] ? ' — ' . htmlspecialchars($o['info']) : '' ?></div>
-      <?php endif; ?>
-    <?php endforeach; ?>
-    </div>
-  </div>
-  <?php endif; ?>
 <?php endif; ?>
 
-<div class="panel" style="margin-bottom:20px">
-  <div class="panel-header"><span class="panel-title">SQL Files in <code>/sql/</code></span></div>
+<div class="panel">
+  <div class="panel-header"><span class="panel-title">Available Scripts</span></div>
   <table class="data-table">
-    <thead><tr><th>File</th><th>Size</th><th>Modified</th><th>Type</th><th style="width:280px">Actions</th></tr></thead>
+    <thead>
+      <tr><th>Script</th><th>Description</th><th style="width:100px">Action</th></tr>
+    </thead>
     <tbody>
-      <?php foreach ($files as $f): ?>
+      <?php foreach ($ALLOWED_FILES as $name => $desc): ?>
+      <?php $exists = is_file($SQL_DIR . DIRECTORY_SEPARATOR . $name); ?>
       <tr>
-        <td class="mono" style="font-weight:600"><?= htmlspecialchars($f['name']) ?></td>
-        <td class="mono dim"><?= number_format($f['size']) ?> B</td>
-        <td class="mono dim" style="font-size:11px"><?= date('Y-m-d H:i', $f['mtime']) ?></td>
+        <td class="mono" style="font-weight:600;white-space:nowrap"><?= htmlspecialchars($name) ?></td>
+        <td style="font-size:12px;color:#555"><?= htmlspecialchars($desc) ?></td>
         <td>
-          <?php if ($f['destructive']): ?>
-          <span class="badge variance" style="font-weight:700">DESTRUCTIVE</span>
-          <?php else: ?>
-          <span class="badge reconciled">migration</span>
-          <?php endif; ?>
-        </td>
-        <td>
-          <a class="btn btn-ghost btn-sm" href="?preview=<?= urlencode($f['name']) ?>"><i class="fa-solid fa-eye"></i> Preview</a>
+          <?php if ($exists): ?>
           <button type="button" class="btn btn-primary btn-sm"
-            style="<?= $f['destructive'] ? 'background:#c0392b;border-color:#c0392b;' : '' ?>"
-            onclick="openRunModal('<?= htmlspecialchars($f['name'], ENT_QUOTES) ?>', <?= $f['destructive'] ? 'true' : 'false' ?>)">
-            <i class="fa-solid fa-play"></i> Run
+                  style="background:#c0392b;border-color:#c0392b;font-weight:700"
+                  onclick="openConfirm('<?= htmlspecialchars($name, ENT_QUOTES) ?>')">
+            <i class="fa-solid fa-rotate-left"></i> Run
           </button>
+          <?php else: ?>
+          <span class="dim" style="font-size:11px">not on disk</span>
+          <?php endif; ?>
         </td>
       </tr>
       <?php endforeach; ?>
-      <?php if (empty($files)): ?>
-      <tr><td colspan="5" class="dim" style="text-align:center;padding:20px">No .sql files found in /sql/.</td></tr>
-      <?php endif; ?>
     </tbody>
   </table>
 </div>
 
-<?php if ($preview_name && $preview_content): ?>
-<div class="panel" style="margin-bottom:20px">
-  <div class="panel-header"><span class="panel-title">Preview: <code><?= htmlspecialchars($preview_name) ?></code></span></div>
-  <pre style="margin:0;padding:14px 18px;font-size:12px;background:#fafafa;border-top:1px solid #eee;overflow:auto;max-height:480px;white-space:pre-wrap"><?= htmlspecialchars($preview_content) ?></pre>
+<div style="margin-top:12px;padding:12px 16px;background:#fff8e1;border-left:4px solid #f0a500;border-radius:3px;font-size:12px;color:#6b4c00">
+  <strong>Note:</strong> Running these scripts affects live data immediately and cannot be undone. Every run is recorded in the <a href="audit.php">Audit Log</a>.
 </div>
-<?php endif; ?>
 
-<!-- Run modal -->
-<div id="run-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;align-items:center;justify-content:center">
-  <div style="background:#fff;border-radius:5px;width:520px;max-width:95vw">
+<!-- Confirmation modal -->
+<div id="confirm-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:5px;width:480px;max-width:95vw;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
     <div style="padding:16px 20px;border-bottom:1px solid #e0e0e0;display:flex;align-items:center">
-      <span style="font-weight:600">Run SQL Script</span>
-      <button onclick="document.getElementById('run-modal').style.display='none'" style="margin-left:auto;background:none;border:none;font-size:20px;cursor:pointer;color:#888">×</button>
+      <span style="font-weight:700;color:#c0392b"><i class="fa-solid fa-triangle-exclamation"></i>&nbsp; Confirm Script Run</span>
+      <button onclick="closeConfirm()" style="margin-left:auto;background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1">×</button>
     </div>
     <form method="POST" style="padding:20px">
       <?= csrf_field() ?>
       <input type="hidden" name="action" value="run_sql">
-      <input type="hidden" name="filename" id="run_filename">
-      <p>About to run <strong id="run_filename_label" style="font-family:monospace"></strong>.</p>
-      <div id="destructive_warning" style="display:none;background:#fff5f5;border-left:4px solid #c0392b;padding:10px 12px;margin:10px 0;font-size:12px;color:#7a2e25">
-        <strong>This file is flagged DESTRUCTIVE.</strong> It will modify or delete data permanently. Type the filename below to confirm.
-        <input type="text" name="confirm_filename" class="form-input" placeholder="type the filename to confirm" style="margin-top:8px">
+      <input type="hidden" name="filename" id="modal-filename">
+      <p style="font-size:13px;margin:0 0 4px;color:#555">About to run:</p>
+      <p style="font-family:monospace;font-size:14px;font-weight:700;color:#c0392b;margin:0 0 14px;word-break:break-all" id="modal-name"></p>
+      <p style="font-size:12px;color:#888;margin:0 0 14px">This will modify data immediately and cannot be undone.</p>
+      <label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:6px">
+        Type the script name exactly to confirm:
+      </label>
+      <div style="display:flex;gap:6px">
+        <input type="text" name="confirm_filename" id="modal-confirm-input"
+               class="form-input" placeholder="type filename here" autocomplete="off" spellcheck="false" style="flex:1">
+        <button type="button" onclick="fillConfirm()"
+                style="background:#f0f0f0;border:1px solid #ccc;border-radius:3px;padding:0 14px;font-size:12px;cursor:pointer;white-space:nowrap;color:#333">
+          Fill
+        </button>
       </div>
-      <div style="display:flex;gap:8px;margin-top:14px">
-        <button type="submit" class="btn btn-primary"><i class="fa-solid fa-play"></i> Run Now</button>
-        <button type="button" class="btn btn-ghost" onclick="document.getElementById('run-modal').style.display='none'">Cancel</button>
+      <p id="modal-match-hint" style="font-size:11px;margin:6px 0 0;min-height:16px"></p>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button type="submit" id="modal-submit-btn" class="btn btn-primary" disabled
+                style="background:#aaa;border-color:#aaa;font-weight:700;cursor:not-allowed">
+          <i class="fa-solid fa-rotate-left"></i> Run Now
+        </button>
+        <button type="button" class="btn btn-ghost" onclick="closeConfirm()">Cancel</button>
       </div>
     </form>
   </div>
 </div>
 
 <script>
-function openRunModal(name, destructive) {
-  document.getElementById('run_filename').value = name;
-  document.getElementById('run_filename_label').textContent = name;
-  document.getElementById('destructive_warning').style.display = destructive ? 'block' : 'none';
-  document.getElementById('run-modal').style.display = 'flex';
+function openConfirm(name) {
+    document.getElementById('modal-filename').value = name;
+    document.getElementById('modal-name').textContent = name;
+    document.getElementById('modal-confirm-input').value = '';
+    document.getElementById('modal-confirm-input').style.borderColor = '';
+    document.getElementById('modal-match-hint').textContent = '';
+    var btn = document.getElementById('modal-submit-btn');
+    btn.disabled = true;
+    btn.style.background   = '#aaa';
+    btn.style.borderColor  = '#aaa';
+    btn.style.cursor       = 'not-allowed';
+    document.getElementById('confirm-modal').style.display = 'flex';
+    setTimeout(function(){ document.getElementById('modal-confirm-input').focus(); }, 60);
 }
-document.getElementById('run-modal').addEventListener('click', function(e) {
-  if (e.target === this) this.style.display = 'none';
+
+function fillConfirm() {
+    var name  = document.getElementById('modal-filename').value;
+    var input = document.getElementById('modal-confirm-input');
+    input.value = name;
+    input.dispatchEvent(new Event('input'));
+    input.focus();
+}
+
+function closeConfirm() {
+    document.getElementById('confirm-modal').style.display = 'none';
+}
+
+document.getElementById('modal-confirm-input').addEventListener('input', function() {
+    var expected = document.getElementById('modal-filename').value;
+    var match    = this.value === expected && expected !== '';
+    var btn      = document.getElementById('modal-submit-btn');
+    var hint     = document.getElementById('modal-match-hint');
+    this.style.borderColor = this.value === '' ? '' : (match ? '#00a950' : '#c0392b');
+    btn.disabled          = !match;
+    btn.style.background  = match ? '#c0392b' : '#aaa';
+    btn.style.borderColor = match ? '#c0392b' : '#aaa';
+    btn.style.cursor      = match ? 'pointer' : 'not-allowed';
+    hint.textContent      = this.value === '' ? '' : (match ? '✓ Ready to run.' : '✗ Does not match yet.');
+    hint.style.color      = match ? '#00a950' : '#c0392b';
+});
+
+document.getElementById('confirm-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeConfirm();
 });
 </script>
 

@@ -58,7 +58,7 @@ $receipts_uploads = array_values(array_filter($available_uploads, function($u) {
 
 <div class="page-header">
   <h1>Reconciliation Engine</h1>
-  <p>Pick a period and click RUN to match already-ingested sales against receipts. Source files are loaded by the Uploader role via the <a href="/icecashRec/utilities/uploaded_files_list.php">Uploaded Files library</a>.</p>
+  <p>Pick a period and click RUN to match already-ingested sales against receipts. Source files are loaded by the Uploader role via the <a href="<?= BASE_URL ?>/utilities/uploaded_files_list.php">Uploaded Files library</a>.</p>
 </div>
 
 <?php if ($success): ?><div class="alert alert-success">✓ <?= $success ?></div><?php endif; ?>
@@ -171,7 +171,7 @@ $receipts_uploads = array_values(array_filter($available_uploads, function($u) {
           <button type="reset" class="btn btn-ghost" style="font-size:12px;font-weight:700">
             <i class="fa fa-refresh"></i> RESET
           </button>
-          <a href="/icecashRec/utilities/uploaded_files_list.php" class="btn btn-ghost" style="font-size:12px;font-weight:700;margin-left:auto">
+          <a href="<?= BASE_URL ?>/utilities/uploaded_files_list.php" class="btn btn-ghost" style="font-size:12px;font-weight:700;margin-left:auto">
             <i class="fa-solid fa-folder-open-o"></i> SOURCE FILES
           </a>
         </div>
@@ -263,8 +263,17 @@ $receipts_uploads = array_values(array_filter($available_uploads, function($u) {
         <td><?= htmlspecialchars($r['full_name']) ?></td>
         <td><span class="badge <?= $r['run_status']==='complete'?'complete':($r['run_status']==='failed'?'failed':'running') ?>">
           <?= $r['run_status']==='complete'?'COMPLETE':($r['run_status']==='failed'?'FAILED':'RUNNING') ?></span></td>
-        <td class="mono" style="font-weight:600;color:#00a950">-</td>
-        <td class="mono" style="font-weight:600;color:#c0392b">-</td>
+        <td class="mono" style="font-weight:600;color:#00a950">
+          <?php if ($r['matched_count'] !== null): ?>
+            <?= (int)$r['matched_count'] ?>
+            <?php if ($r['match_rate'] !== null): ?>
+            <span style="font-size:10px;color:#888;font-weight:400">(<?= number_format($r['match_rate'], 0) ?>%)</span>
+            <?php endif; ?>
+          <?php else: ?>—<?php endif; ?>
+        </td>
+        <td class="mono" style="font-weight:600;color:#c0392b">
+          <?= $r['unmatched_receipts'] !== null ? (int)$r['unmatched_receipts'] : '—' ?>
+        </td>
         <td>
           <a href="reconciliation_results.php?run_id=<?= $r['id'] ?>" class="btn btn-ghost btn-sm" style="font-weight:700"><i class="fa-solid fa-eye"></i> VIEW DETAILS</a>
           <?php if ($r['run_status'] === 'running'): ?>

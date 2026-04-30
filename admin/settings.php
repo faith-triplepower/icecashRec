@@ -247,7 +247,7 @@ $timezone    = $prefs['timezone']    ?? 'Africa/Harare';
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Theme</label>
-              <select name="theme" class="form-select">
+              <select name="theme" id="theme-select" class="form-select">
                 <option value="default" <?= $theme==='default'?'selected':'' ?>>Default (Zimnat green)</option>
                 <option value="light"   <?= $theme==='light'  ?'selected':'' ?>>Light</option>
                 <option value="dark"    <?= $theme==='dark'   ?'selected':'' ?>>Dark</option>
@@ -356,5 +356,13 @@ $timezone    = $prefs['timezone']    ?? 'Africa/Harare';
     <?php endif; ?>
   </div>
 </div>
+
+<script>
+// Live theme preview — update body class immediately when dropdown changes
+// so the user sees the effect before hitting Save.
+document.getElementById('theme-select').addEventListener('change', function () {
+    document.body.className = 'theme-' + this.value;
+});
+</script>
 
 <?php require_once '../layouts/layout_footer.php'; ?>

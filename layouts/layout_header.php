@@ -17,6 +17,20 @@ if (!ob_get_level()) ob_start();
 
 require_login();
 $user = current_user();
+
+// Load the user's saved theme preference so we can apply the body class
+$_theme = 'default';
+if ($user) {
+    $_db = get_db();
+    $_t  = $_db->prepare("SELECT pref_val FROM user_preferences WHERE user_id=? AND pref_key='theme' LIMIT 1");
+    $_t->bind_param('i', $user['id']);
+    $_t->execute();
+    $_tr = $_t->get_result()->fetch_assoc();
+    $_t->close();
+    if ($_tr && in_array($_tr['pref_val'], ['light', 'dark', 'default'])) {
+        $_theme = $_tr['pref_val'];
+    }
+}
 ?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
@@ -31,10 +45,10 @@ $user = current_user();
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet" />
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css?family=Open+Sans:400,600,700" rel="stylesheet" />
-    <!-- App Styles -->
-    <link rel="stylesheet" href="/icecashRec/assets/css/app.css" />
+    <!-- App Styles (version param forces reload when file changes) -->
+    <link rel="stylesheet" href="<?= BASE_URL ?>/assets/css/app.css?v=<?= filemtime(__DIR__ . '/../assets/css/app.css') ?>" />
 </head>
-<body>
+<body class="theme-<?= htmlspecialchars($_theme) ?>">
 <div id="wrapper">
 
     <!-- ══ TOP NAVBAR ══ -->
@@ -46,7 +60,7 @@ $user = current_user();
                 <span class="icon-bar"></span>
                 <span class="icon-bar"></span>
             </button>
-            <a class="navbar-brand" href="/icecashRec/modules/dashboard.php">
+            <a class="navbar-brand" href="<?= BASE_URL ?>/modules/dashboard.php">
                 Icecash<span>Rec</span>
             </a>
         </div>
@@ -97,17 +111,17 @@ $user = current_user();
                         <div style="font-weight:600;color:#333;font-size:13px"><?= htmlspecialchars($user['name']) ?></div>
                         <div style="font-size:11px;color:#888"><?= htmlspecialchars($user['role']) ?> &middot; <?= htmlspecialchars($user['username']) ?></div>
                     </div>
-                    <a href="/icecashRec/admin/settings.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#333;text-decoration:none;font-size:12px;transition:background 0.1s" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">
+                    <a href="<?= BASE_URL ?>/admin/settings.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#333;text-decoration:none;font-size:12px;transition:background 0.1s" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">
                         <i class="fa-solid fa-gear" style="width:16px;text-align:center;color:#888"></i> Settings
                     </a>
-                    <a href="/icecashRec/pages/setup_2fa.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#333;text-decoration:none;font-size:12px;transition:background 0.1s" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">
+                    <a href="<?= BASE_URL ?>/pages/setup_2fa.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#333;text-decoration:none;font-size:12px;transition:background 0.1s" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">
                         <i class="fa fa-shield" style="width:16px;text-align:center;color:#888"></i> Two-Factor Auth
                     </a>
-                    <a href="/icecashRec/pages/change_password.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#333;text-decoration:none;font-size:12px;transition:background 0.1s" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">
+                    <a href="<?= BASE_URL ?>/pages/change_password.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#333;text-decoration:none;font-size:12px;transition:background 0.1s" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">
                         <i class="fa-solid fa-key" style="width:16px;text-align:center;color:#888"></i> Change Password
                     </a>
                     <div style="border-top:1px solid #f0f0f0">
-                        <a href="/icecashRec/pages/logout.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#c0392b;text-decoration:none;font-size:12px;font-weight:600;transition:background 0.1s" onmouseover="this.style.background='#fdf4f4'" onmouseout="this.style.background='#fff'">
+                        <a href="<?= BASE_URL ?>/pages/logout.php" style="display:flex;align-items:center;gap:10px;padding:10px 16px;color:#c0392b;text-decoration:none;font-size:12px;font-weight:600;transition:background 0.1s" onmouseover="this.style.background='#fdf4f4'" onmouseout="this.style.background='#fff'">
                             <i class="fa-solid fa-right-from-bracket" style="width:16px;text-align:center"></i> Logout
                         </a>
                     </div>
@@ -135,7 +149,7 @@ $user = current_user();
 
             <!-- Logo -->
             <li class="text-center">
-                <img src="/icecashRec/assets/img/zimnat logo.png" class="user-image img-responsive" />
+                <img src="<?= BASE_URL ?>/assets/img/zimnat logo.png" class="user-image img-responsive" />
             </li>
 
 
@@ -152,13 +166,13 @@ $user = current_user();
             <!-- Overview -->
             <li class="sidebar-section-label">Overview</li>
             <li class="<?= ($active_nav==='dashboard') ? 'active' : '' ?>">
-                <a href="/icecashRec/modules/dashboard.php">
+                <a href="<?= BASE_URL ?>/modules/dashboard.php">
                     <i class="fa-solid fa-gauge-high fa-fw"></i> Dashboard
                 </a>
             </li>
             <?php if ($can_reconcile): ?>
             <li class="<?= ($active_nav==='reconciliation') ? 'active' : '' ?>">
-                <a href="/icecashRec/modules/reconciliation.php">
+                <a href="<?= BASE_URL ?>/modules/reconciliation.php">
                     <i class="fa-solid fa-arrows-rotate fa-fw"></i> Reconciliation
                 </a>
             </li>
@@ -170,13 +184,13 @@ $user = current_user();
             </li>
             <?php if ($can_upload): ?>
             <li class="<?= ($active_nav==='upload') ? 'active' : '' ?>">
-                <a href="/icecashRec/utilities/upload.php">
+                <a href="<?= BASE_URL ?>/utilities/upload.php">
                     <i class="fa-solid fa-cloud-arrow-up fa-fw"></i> Upload Files
                 </a>
             </li>
             <?php endif; ?>
             <li class="<?= ($active_nav==='upload' && !$can_upload) ? 'active' : '' ?>">
-                <a href="/icecashRec/utilities/uploaded_files_list.php">
+                <a href="<?= BASE_URL ?>/utilities/uploaded_files_list.php">
                     <i class="fa-regular fa-folder-open fa-fw"></i> <?= $is_uploader ? 'My Uploads' : 'Uploaded Files' ?>
                 </a>
             </li>
@@ -184,12 +198,12 @@ $user = current_user();
                  imports (scoped by upload_id in the page itself); everyone
                  else sees the full dataset. -->
             <li class="<?= ($active_nav==='sales') ? 'active' : '' ?>">
-                <a href="/icecashRec/modules/sales.php">
+                <a href="<?= BASE_URL ?>/modules/sales.php">
                     <i class="fa-solid fa-chart-column fa-fw"></i> Sales Data
                 </a>
             </li>
             <li class="<?= ($active_nav==='receipts') ? 'active' : '' ?>">
-                <a href="/icecashRec/modules/receipts.php">
+                <a href="<?= BASE_URL ?>/modules/receipts.php">
                     <i class="fa-regular fa-file-lines fa-fw"></i> Receipts Data
                 </a>
             </li>
@@ -198,27 +212,27 @@ $user = current_user();
             <?php if ($can_reconcile): ?>
             <li class="sidebar-section-label"><?= $is_reconciler ? 'Reconciliation Tools' : 'Oversight' ?></li>
             <li class="<?= ($active_nav==='variance') ? 'active' : '' ?>">
-                <a href="/icecashRec/modules/variance.php">
+                <a href="<?= BASE_URL ?>/modules/variance.php">
                     <i class="fa-solid fa-triangle-exclamation fa-fw"></i> Variance Report
                 </a>
             </li>
             <li class="<?= ($active_nav==='statements') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/statements.php">
+                <a href="<?= BASE_URL ?>/admin/statements.php">
                     <i class="fa-regular fa-file-lines fa-fw"></i> Statements
                 </a>
             </li>
             <li class="<?= ($active_nav==='agents') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/agents.php">
+                <a href="<?= BASE_URL ?>/admin/agents.php">
                     <i class="fa-solid fa-people-group fa-fw"></i> Agents / Channels
                 </a>
             </li>
             <li class="<?= ($active_nav==='pos_terminals') ? 'active' : '' ?>">
-                <a href="/icecashRec/modules/pos_terminals.php">
+                <a href="<?= BASE_URL ?>/modules/pos_terminals.php">
                     <i class="fa-solid fa-cash-register fa-fw"></i> POS Terminals
                 </a>
             </li>
             <li class="<?= ($active_nav==='unmatched') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/unmatched.php">
+                <a href="<?= BASE_URL ?>/admin/unmatched.php">
                     <i class="fa-solid fa-circle-question fa-fw"></i> Unmatched Transactions
                 </a>
             </li>
@@ -227,47 +241,43 @@ $user = current_user();
             <!-- System -->
             <li class="sidebar-section-label">System</li>
             <li class="<?= ($active_nav==='audit') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/audit.php">
+                <a href="<?= BASE_URL ?>/admin/audit.php">
                     <i class="fa-solid fa-clock-rotate-left fa-fw"></i> Audit Log
                 </a>
             </li>
             <?php if ($user['role'] === 'Manager'): ?>
             <li class="<?= ($active_nav==='escalations') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/escalations.php">
+                <a href="<?= BASE_URL ?>/admin/escalations.php">
                     <i class="fa-solid fa-fire fa-fw"></i> Escalations
                 </a>
             </li>
             <?php endif; ?>
             <?php if ($user['role'] === 'Manager' || $user['role'] === 'Admin'): ?>
             <li class="<?= ($active_nav==='outbox') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/outbox.php">
+                <a href="<?= BASE_URL ?>/admin/outbox.php">
                     <i class="fa-regular fa-envelope fa-fw"></i> Notification Outbox
                 </a>
             </li>
             <li class="<?= ($active_nav==='users') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/users.php">
+                <a href="<?= BASE_URL ?>/admin/users.php">
                     <i class="fa-solid fa-user-gear fa-fw"></i> User Management
                 </a>
             </li>
             <?php endif; ?>
             <li class="<?= ($active_nav==='settings') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/settings.php">
+                <a href="<?= BASE_URL ?>/admin/settings.php">
                     <i class="fa-solid fa-sliders fa-fw"></i> Settings
                 </a>
             </li>
 
             <?php if ($user['role'] === 'Admin'): ?>
-            <li class="sidebar-section-label" style="margin-top:4px;color:rgba(255,220,100,0.7)">Administration</li>
+            <li class="sidebar-section-label" style="margin-top:4px;color:1px solid rgba(107, 108, 109, 0.3)">Administration</li>
             <li class="<?= ($active_nav==='admin_panel') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/admin_panel.php" style="color:rgba(255,220,100,0.9) !important">
+                <a href="<?= BASE_URL ?>/admin/admin_panel.php" style="color:rgba(255,220,100,0.9) !important">
                     <i class="fa-solid fa-shield-halved fa-fw"></i> Admin Panel
                 </a>
             </li>
-            <li class="<?= ($active_nav==='db_admin') ? 'active' : '' ?>">
-                <a href="/icecashRec/admin/db_admin.php" style="color:rgba(255,220,100,0.9) !important">
-                    <i class="fa-solid fa-database fa-fw"></i> Database
-                </a>
-            </li>
+
             <?php endif; ?>
 
         </ul>
@@ -369,7 +379,7 @@ overlay.addEventListener('click', closeSidebar);
                     var body = new URLSearchParams();
                     body.append('action', 'mark_one_read');
                     body.append('key', key);
-                    fetch('/icecashRec/process/process_notifications.php', {
+                    fetch('<?= BASE_URL ?>/process/process_notifications.php', {
                         method: 'POST', body: body, credentials: 'same-origin'
                     });
                     // Update badge count immediately
@@ -393,7 +403,7 @@ overlay.addEventListener('click', closeSidebar);
                     var body = new URLSearchParams();
                     body.append('action', 'dismiss');
                     body.append('key', key);
-                    fetch('/icecashRec/process/process_notifications.php', {
+                    fetch('<?= BASE_URL ?>/process/process_notifications.php', {
                         method: 'POST', body: body, credentials: 'same-origin'
                     }).then(function () { loadNotifications(); });
                 });
@@ -411,7 +421,7 @@ overlay.addEventListener('click', closeSidebar);
     }
 
     function loadNotifications() {
-        fetch('/icecashRec/process/process_notifications.php?action=list', { credentials: 'same-origin' })
+        fetch('<?= BASE_URL ?>/process/process_notifications.php?action=list', { credentials: 'same-origin' })
             .then(function (r) { return r.json(); })
             .then(render)
             .catch(function () {
@@ -441,7 +451,7 @@ overlay.addEventListener('click', closeSidebar);
             var body = new URLSearchParams();
             body.append('action', 'mark_one_read');
             body.append('key', key);
-            fetch('/icecashRec/process/process_notifications.php', {
+            fetch('<?= BASE_URL ?>/process/process_notifications.php', {
                 method: 'POST', body: body, credentials: 'same-origin'
             });
         });

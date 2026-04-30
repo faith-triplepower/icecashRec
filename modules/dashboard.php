@@ -96,6 +96,10 @@ $is_manager    = $role === 'Manager' || $role === 'Admin';
 // UPLOADER DATA — only queried if needed
 // ══════════════════════════════════════════════════════════
 if ($is_uploader) {
+    // Use the current calendar month for upload counts — the card says
+    // "this month" meaning when files were submitted, not the transaction
+    // period inside the data (which drives $month_start/$month_end for
+    // the reconciliation view and would exclude April uploads of March data).
     $u_kpi_stmt = $db->prepare("
         SELECT
             COUNT(*) AS total_files,
@@ -106,8 +110,8 @@ if ($is_uploader) {
         FROM upload_history
         WHERE uploaded_by = ? AND created_at BETWEEN ? AND ?
     ");
-    $mstart = $month_start . ' 00:00:00';
-    $mend   = $month_end   . ' 23:59:59';
+    $mstart = date('Y-m-01') . ' 00:00:00';
+    $mend   = date('Y-m-t')  . ' 23:59:59';
     $u_kpi_stmt->bind_param('iss', $uid, $mstart, $mend);
     $u_kpi_stmt->execute();
     $u_kpi = $u_kpi_stmt->get_result()->fetch_assoc();
@@ -300,7 +304,7 @@ $status_class = array(
       <div style="font-size:17px;font-weight:700">Upload new source files</div>
       <div style="font-size:12px;opacity:0.85;margin-top:4px">CSV, Excel, or PDF — multiple files at once</div>
     </div>
-    <a href="/icecashRec/utilities/upload.php" class="btn btn-primary" style="background:#fff;color:#00a950;font-weight:700;padding:10px 22px">
+    <a href="<?= BASE_URL ?>/utilities/upload.php" class="btn btn-primary" style="background:#fff;color:#00a950;font-weight:700;padding:10px 22px">
       <i class="fa fa-upload"></i>&nbsp; Upload Files
     </a>
   </div>
@@ -314,7 +318,7 @@ $status_class = array(
         <?= fmt_compact($r_kpi['sales_cnt']) ?> sales &middot; <?= fmt_compact($r_kpi['rec_cnt']) ?> receipts in <?= htmlspecialchars($period_label) ?>
       </div>
     </div>
-    <a href="/icecashRec/modules/reconciliation.php" class="btn btn-primary" style="background:#fff;color:#00a950;font-weight:700;padding:10px 22px">
+    <a href="<?= BASE_URL ?>/modules/reconciliation.php" class="btn btn-primary" style="background:#fff;color:#00a950;font-weight:700;padding:10px 22px">
       <i class="fa fa-refresh"></i>&nbsp; Run Reconciliation
     </a>
   </div>
@@ -356,17 +360,17 @@ $status_class = array(
   <div class="stat-card warn">
     <div class="stat-label">Unmatched</div>
     <div class="stat-value" title="<?= number_format($r_kpi['pending_cnt']) ?>"><?= fmt_compact($r_kpi['pending_cnt']) ?></div>
-    <div class="stat-sub"><a href="/icecashRec/admin/unmatched.php" style="color:inherit">Review queue &rarr;</a></div>
+    <div class="stat-sub"><a href="<?= BASE_URL ?>/admin/unmatched.php" style="color:inherit">Review queue &rarr;</a></div>
   </div>
   <div class="stat-card red">
     <div class="stat-label">Variances</div>
     <div class="stat-value" title="<?= number_format($r_kpi['variance_cnt']) ?>"><?= fmt_compact($r_kpi['variance_cnt']) ?></div>
-    <div class="stat-sub"><a href="/icecashRec/modules/variance.php" style="color:inherit">Variance report &rarr;</a></div>
+    <div class="stat-sub"><a href="<?= BASE_URL ?>/modules/variance.php" style="color:inherit">Variance report &rarr;</a></div>
   </div>
   <div class="stat-card" style="border-left:4px solid #8a5a00">
     <div class="stat-label">Float Outflows</div>
     <div class="stat-value" title="<?= number_format($r_kpi['debit_total'] ?? 0, 2) ?>"><?= fmt_compact($r_kpi['debit_total'] ?? 0) ?></div>
-    <div class="stat-sub"><?= fmt_compact($r_kpi['debit_cnt'] ?? 0) ?> debits &middot; <a href="/icecashRec/admin/unmatched.php?tab=debits" style="color:inherit">Review &rarr;</a></div>
+    <div class="stat-sub"><?= fmt_compact($r_kpi['debit_cnt'] ?? 0) ?> debits &middot; <a href="<?= BASE_URL ?>/admin/unmatched.php?tab=debits" style="color:inherit">Review &rarr;</a></div>
   </div>
 </div>
 
@@ -391,13 +395,13 @@ $status_class = array(
   <div class="stat-card red">
     <div class="stat-label">Escalations</div>
     <div class="stat-value"><?= fmt_compact($m_escalations_open) ?></div>
-    <div class="stat-sub"><a href="/icecashRec/admin/escalations.php" style="color:inherit">Open queue &rarr;</a></div>
+    <div class="stat-sub"><a href="<?= BASE_URL ?>/admin/escalations.php" style="color:inherit">Open queue &rarr;</a></div>
   </div>
   <?php endif; ?>
   <div class="stat-card" style="border-left:4px solid #8a5a00">
     <div class="stat-label">Float Outflows</div>
     <div class="stat-value" title="<?= number_format($m_outflows['total'] ?? 0, 2) ?>"><?= fmt_compact($m_outflows['total'] ?? 0) ?></div>
-    <div class="stat-sub"><?= fmt_compact($m_outflows['c'] ?? 0) ?> debits &middot; <a href="/icecashRec/admin/unmatched.php?tab=debits" style="color:inherit">Review &rarr;</a></div>
+    <div class="stat-sub"><?= fmt_compact($m_outflows['c'] ?? 0) ?> debits &middot; <a href="<?= BASE_URL ?>/admin/unmatched.php?tab=debits" style="color:inherit">Review &rarr;</a></div>
   </div>
 </div>
 <?php endif; ?>
@@ -408,13 +412,13 @@ $status_class = array(
 <div class="alert" style="background:#fff4d6;border-left:4px solid #c0392b;color:#5a0000;margin-top:16px;padding:12px 16px;border-radius:3px">
   <strong><i class="fa-solid fa-flag"></i>&nbsp; <?= $u_flagged_count ?> file<?= $u_flagged_count === 1 ? '' : 's' ?> need<?= $u_flagged_count === 1 ? 's' : '' ?> your attention</strong>
   &middot; A reconciler has flagged <?= $u_flagged_count === 1 ? 'a file' : 'files' ?> with issues. Review the note<?= $u_flagged_count === 1 ? '' : 's' ?> and re-upload a corrected version.
-  <a href="/icecashRec/utilities/uploaded_files_list.php" style="color:#5a0000;font-weight:700;margin-left:6px">Review flagged files &rarr;</a>
+  <a href="<?= BASE_URL ?>/utilities/uploaded_files_list.php" style="color:#5a0000;font-weight:700;margin-left:6px">Review flagged files &rarr;</a>
 </div>
 <?php endif; ?>
 <div class="panel" style="margin-top:16px">
   <div class="panel-header">
     <span class="panel-title">Your Recent Uploads</span>
-    <a href="/icecashRec/utilities/uploaded_files_list.php" class="btn btn-ghost btn-sm" style="float:right;margin-top:-4px">View All &rarr;</a>
+    <a href="<?= BASE_URL ?>/utilities/uploaded_files_list.php" class="btn btn-ghost btn-sm" style="float:right;margin-top:-4px">View All &rarr;</a>
   </div>
   <table class="data-table">
     <thead><tr><th>Filename</th><th>Type</th><th style="text-align:right">Records</th><th>Status</th><th>Uploaded</th></tr></thead>
@@ -422,7 +426,7 @@ $status_class = array(
       <?php foreach ($u_recent as $f): ?>
       <tr<?= $f['flag_status'] === 'flagged' ? ' style="background:#fff4d6"' : '' ?>>
         <td class="mono" style="font-size:11px;color:var(--accent2)">
-          <a href="/icecashRec/utilities/uploaded_file_detail.php?id=<?= (int)$f['id'] ?>"><?= htmlspecialchars($f['filename']) ?></a>
+          <a href="<?= BASE_URL ?>/utilities/uploaded_file_detail.php?id=<?= (int)$f['id'] ?>"><?= htmlspecialchars($f['filename']) ?></a>
         </td>
         <td><span class="badge <?= $f['file_type']==='Sales'?'ccy-zwg':'ccy-usd' ?>"><?= $f['file_type'] ?></span></td>
         <td class="mono" style="text-align:right" title="<?= $f['record_count'] !== null ? number_format($f['record_count']) . ' records' : '' ?>"><?= fmt_compact($f['record_count']) ?></td>
@@ -440,7 +444,7 @@ $status_class = array(
       </tr>
       <?php endforeach; ?>
       <?php if (empty($u_recent)): ?>
-      <tr><td colspan="5" class="dim" style="text-align:center;padding:20px">No uploads yet. <a href="/icecashRec/utilities/upload.php"><strong>Upload your first file &rarr;</strong></a></td></tr>
+      <tr><td colspan="5" class="dim" style="text-align:center;padding:20px">No uploads yet. <a href="<?= BASE_URL ?>/utilities/upload.php"><strong>Upload your first file &rarr;</strong></a></td></tr>
       <?php endif; ?>
     </tbody>
   </table>
@@ -451,7 +455,7 @@ $status_class = array(
 <div class="panel" style="margin-top:16px">
   <div class="panel-header">
     <span class="panel-title">Last Reconciliation Run</span>
-    <a href="/icecashRec/modules/variance.php?run_id=<?= (int)$last_run['id'] ?>" class="btn btn-ghost btn-sm" style="float:right;margin-top:-4px">Open &rarr;</a>
+    <a href="<?= BASE_URL ?>/modules/variance.php?run_id=<?= (int)$last_run['id'] ?>" class="btn btn-ghost btn-sm" style="float:right;margin-top:-4px">Open &rarr;</a>
   </div>
   <div style="padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px;font-size:12px">
     <div><span class="dim">Run #</span><br><strong class="mono">#<?= (int)$last_run['id'] ?></strong></div>
@@ -467,7 +471,7 @@ $status_class = array(
 <div class="panel" style="margin-top:16px">
   <div class="panel-header">
     <span class="panel-title">Datasets Ready to Reconcile</span>
-    <a href="/icecashRec/utilities/uploaded_files_list.php" class="btn btn-ghost btn-sm" style="float:right;margin-top:-4px">All &rarr;</a>
+    <a href="<?= BASE_URL ?>/utilities/uploaded_files_list.php" class="btn btn-ghost btn-sm" style="float:right;margin-top:-4px">All &rarr;</a>
   </div>
   <table class="data-table">
     <thead><tr><th>Filename</th><th>Type</th><th>Uploader</th><th>Records</th><th>Date</th></tr></thead>
@@ -475,7 +479,7 @@ $status_class = array(
       <?php foreach ($r_ready as $d): ?>
       <tr>
         <td class="mono" style="font-size:11px;color:var(--accent2)">
-          <a href="/icecashRec/utilities/uploaded_file_detail.php?id=<?= (int)$d['id'] ?>"><?= htmlspecialchars($d['filename']) ?></a>
+          <a href="<?= BASE_URL ?>/utilities/uploaded_file_detail.php?id=<?= (int)$d['id'] ?>"><?= htmlspecialchars($d['filename']) ?></a>
         </td>
         <td><span class="badge <?= $d['file_type']==='Sales'?'ccy-zwg':'ccy-usd' ?>"><?= $d['file_type'] ?></span></td>
         <td class="dim" style="font-size:11px"><?= htmlspecialchars($d['uploader_name']) ?></td>
@@ -617,7 +621,7 @@ new Chart(document.getElementById('chart-methods'), {
     <span class="panel-title">Agent Reconciliation Status</span>
     <div style="display:flex;gap:8px;align-items:center">
       <input type="text" id="dash-agent-search" placeholder="Search agent..." oninput="dashFilterAgents()" style="padding:4px 10px;border:1px solid #ddd;border-radius:4px;font-size:11px;width:160px">
-      <a href="/icecashRec/admin/agents.php" class="btn btn-ghost btn-sm">View all &rarr;</a>
+      <a href="<?= BASE_URL ?>/admin/agents.php" class="btn btn-ghost btn-sm">View all &rarr;</a>
     </div>
   </div>
   <table class="data-table" id="dash-agent-table">

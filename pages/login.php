@@ -21,7 +21,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // Rate limiting: block after 5 failed attempts in 15 minutes
     $wait = check_login_rate($username);
     if ($wait > 0) {
         $mins = (int)ceil($wait / 60);
@@ -29,22 +28,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    if (login($username, $password)) {
-        $user = current_user();
-        // Check if 2FA is enabled for this user
-        if (totp_is_enabled($db, (int)$user['id'])) {
-            // Defer full session — store user ID pending 2FA verification
-            $pending_uid = (int)$user['id'];
-            session_unset();
-            $_SESSION['_2fa_pending_uid'] = $pending_uid;
+    $needs_2fa = false;
+    $disabled  = false;
+    if (login($username, $password, $needs_2fa, $disabled)) {
+        if ($needs_2fa) {
             header('Location: ' . BASE_URL . '/pages/verify_2fa.php');
-            exit;
+        } else {
+            header('Location: ' . BASE_URL . '/modules/dashboard.php');
         }
-        $_SESSION['email']   = $user['email'];
-        $_SESSION['name']    = $user['name'];
-        $_SESSION['role']    = $user['role'];
-        $_SESSION['user_id'] = $user['id'];
-        header('Location: ' . BASE_URL . '/modules/dashboard.php');
+        exit;
+    } elseif ($disabled) {
+        header('Location: ' . BASE_URL . '/pages/login.php?error=disabled');
         exit;
     } else {
         header('Location: ' . BASE_URL . '/pages/login.php?error=invalid');
@@ -54,8 +48,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $error_param = $_GET['error'] ?? '';
 $error = '';
-if ($error_param === 'empty')   $error = 'Please enter your username and password.';
-if ($error_param === 'invalid') $error = 'Invalid username or password. Please try again.';
+if ($error_param === 'empty')    $error = 'Please enter your username and password.';
+if ($error_param === 'invalid')  $error = 'Invalid username or password. Please try again.';
+if ($error_param === 'disabled') $error = 'Your account has been deactivated. Please contact your administrator for assistance.';
 ?>
 <!DOCTYPE html>
 <html lang="en">

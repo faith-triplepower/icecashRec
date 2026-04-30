@@ -69,7 +69,7 @@ function globalSearch(q) {
     if (!box) return;
     if (q.length < 3) { box.style.display = 'none'; return; }
     _gsTimer = setTimeout(function() {
-        fetch('/icecashRec/process/process_search.php?q=' + encodeURIComponent(q))
+        fetch('<?= BASE_URL ?>/process/process_search.php?q=' + encodeURIComponent(q))
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (!data.results || data.results.length === 0) {

@@ -1,44 +1,47 @@
 -- ============================================================
 -- reset_test_data.sql
 --
--- Wipes all transactional / log data so you can re-test from a
--- clean slate, while KEEPING configuration:
---   kept   : users, agents, pos_terminals, terminal_assignments,
---            banks, system_settings, user_preferences, audit_log
---   wiped  : sales, receipts, reconciliation_runs, variance_results,
---            variance_by_channel, manual_match_log, statements,
---            escalations, upload_history, login_attempts
+-- Full system wipe for moving from testing to production.
 --
--- DESTRUCTIVE — run only when you actually want a fresh test run.
+-- KEPT:   users, banks, system_settings
+-- WIPED:  everything else — agents, pos_terminals,
+--         terminal_assignments, sales, receipts,
+--         reconciliation_runs, variance_results,
+--         variance_by_channel, manual_match_log, statements,
+--         escalations, upload_history, user_preferences,
+--         audit_log, login_attempts
 --
--- Uses DELETE FROM rather than TRUNCATE because cPanel-hosted MySQL
--- accounts typically lack the DROP privilege that TRUNCATE requires.
--- DELETE only needs DELETE privilege, which app users always have.
--- The trade-off: AUTO_INCREMENT counters keep climbing instead of
--- resetting to 1 — harmless for test data.
+-- DESTRUCTIVE — cannot be undone. Run only when you are certain
+-- you want a clean production start.
 --
--- Order is dependents-first so foreign-key constraints are satisfied
--- without needing SUPER to disable FK checks.
+-- Uses DELETE FROM (not TRUNCATE) so only DELETE privilege is
+-- needed — TRUNCATE requires DROP which cPanel accounts lack.
+-- AUTO_INCREMENT counters keep climbing; this is harmless.
 --
--- audit_log is INTENTIONALLY kept. It's the immutable record of
--- "who did what" — wiping it on every test reset defeats its
--- purpose, and on installs that have run install.sql there are
--- triggers blocking the DELETE anyway.
+-- Dependents are deleted before their parents so foreign-key
+-- constraints are satisfied without disabling FK checks.
 -- ============================================================
 
--- Runs against whichever database the connection is already pointed at.
-
+-- ── 1. Variance / result tables (depend on runs + agents) ──
 DELETE FROM variance_by_channel;
 DELETE FROM variance_results;
-DELETE FROM manual_match_log;
+
+-- ── 2. Statements and escalations (depend on runs + agents) ─
 DELETE FROM statements;
 DELETE FROM escalations;
+
+-- ── 3. Manual match log (depends on receipts / runs) ────────
+DELETE FROM manual_match_log;
+
+-- ── 4. Reconciliation runs (referenced by above) ────────────
 DELETE FROM reconciliation_runs;
+
+-- ── 5. Transaction data ──────────────────────────────────────
 DELETE FROM receipts;
 DELETE FROM sales;
 DELETE FROM upload_history;
 
--- login_attempts is created by some migrations and not others — guard.
+-- ── 6. Login attempts (table may not exist on all installs) ──
 SET @stmt = (SELECT IF(
     (SELECT COUNT(*) FROM information_schema.tables
        WHERE table_schema = DATABASE() AND table_name = 'login_attempts') > 0,
@@ -47,13 +50,23 @@ SET @stmt = (SELECT IF(
 ));
 PREPARE s FROM @stmt; EXECUTE s; DEALLOCATE PREPARE s;
 
--- Sanity-check counts after the wipe.
+-- ── 7. User preferences and audit log ───────────────────────
+DELETE FROM user_preferences;
+DELETE FROM audit_log;
+
+-- ── 8. Terminal assignments then terminals (agents last) ─────
+DELETE FROM terminal_assignments;
+DELETE FROM pos_terminals;
+DELETE FROM agents;
+
+-- ── Sanity check ─────────────────────────────────────────────
 SELECT
+  (SELECT COUNT(*) FROM agents)              AS agents,
+  (SELECT COUNT(*) FROM pos_terminals)       AS terminals,
   (SELECT COUNT(*) FROM sales)               AS sales,
   (SELECT COUNT(*) FROM receipts)            AS receipts,
   (SELECT COUNT(*) FROM reconciliation_runs) AS recon_runs,
   (SELECT COUNT(*) FROM upload_history)      AS uploads,
+  (SELECT COUNT(*) FROM user_preferences)    AS user_prefs,
   (SELECT COUNT(*) FROM audit_log)           AS audit_rows,
-  (SELECT COUNT(*) FROM users)               AS users_kept,
-  (SELECT COUNT(*) FROM agents)              AS agents_kept,
-  (SELECT COUNT(*) FROM pos_terminals)       AS terminals_kept;
+  (SELECT COUNT(*) FROM users)               AS users_kept;

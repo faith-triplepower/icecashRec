@@ -77,12 +77,12 @@ function _base32_decode($input) {
 
 // DB helpers — stores totp_secret in user_preferences
 function totp_is_enabled($db, $user_id) {
-    $stmt = $db->prepare("SELECT pref_val FROM user_preferences WHERE user_id=? AND pref_key='totp_secret'");
+    $stmt = $db->prepare("SELECT pref_val FROM user_preferences WHERE user_id=? AND pref_key='totp_secret' LIMIT 1");
     $stmt->bind_param('i', $user_id);
     $stmt->execute();
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-    return $row && !empty($row['pref_val']);
+    return ($row && !empty($row['pref_val']));
 }
 
 function totp_get_secret($db, $user_id) {
@@ -95,7 +95,10 @@ function totp_get_secret($db, $user_id) {
 }
 
 function totp_save_secret($db, $user_id, $secret) {
-    $db->query("DELETE FROM user_preferences WHERE user_id=$user_id AND pref_key='totp_secret'");
+    $del = $db->prepare("DELETE FROM user_preferences WHERE user_id=? AND pref_key='totp_secret'");
+    $del->bind_param('i', $user_id);
+    $del->execute();
+    $del->close();
     $stmt = $db->prepare("INSERT INTO user_preferences (user_id, pref_key, pref_val) VALUES (?, 'totp_secret', ?)");
     $stmt->bind_param('is', $user_id, $secret);
     $stmt->execute();
@@ -103,7 +106,10 @@ function totp_save_secret($db, $user_id, $secret) {
 }
 
 function totp_disable($db, $user_id) {
-    $db->query("DELETE FROM user_preferences WHERE user_id=$user_id AND pref_key='totp_secret'");
+    $stmt = $db->prepare("DELETE FROM user_preferences WHERE user_id=? AND pref_key='totp_secret'");
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $stmt->close();
 }
 
 function totp_is_required_for_role($role) {

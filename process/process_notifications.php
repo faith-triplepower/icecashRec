@@ -163,7 +163,7 @@ if ($role === 'Manager') {
             'type'      => 'escalation',
             'title'     => $title,
             'desc'      => $desc,
-            'link'      => '/icecashRec/admin/escalations.php',
+            'link'      => BASE_URL . '/admin/escalations.php',
             'created_at'=> $e['created_at'],
             'unread'    => $e['created_at'] > $last_read,
         );
@@ -185,7 +185,7 @@ if ($role === 'Manager') {
             'type'      => 'recon_failed',
             'title'     => '✕ Reconciliation run #' . $r['id'] . ' failed',
             'desc'      => ($r['period_label'] ?? '') . ' — ' . substr($r['progress_msg'] ?? 'Unknown error', 0, 100),
-            'link'      => '/icecashRec/modules/reconciliation.php',
+            'link'      => BASE_URL . '/modules/reconciliation.php',
             'created_at'=> $r['started_at'],
             'unread'    => $r['started_at'] > $last_read,
         );
@@ -215,7 +215,7 @@ if (in_array($role, array('Reconciler','Manager','Admin'))) {
             'type'      => 'escalation_closed',
             'title'     => $icon . ' Your escalation #' . $e['id'] . ' ' . $e['status'],
             'desc'      => 'By ' . ($e['reviewed_by_name'] ?? 'manager') . ' — ' . substr($e['action_detail'], 0, 80),
-            'link'      => '/icecashRec/admin/escalations.php?filter=' . $e['status'],
+            'link'      => BASE_URL . '/admin/escalations.php?filter=' . $e['status'],
             'created_at'=> $e['reviewed_at'],
             'unread'    => $e['reviewed_at'] > $last_read,
         );
@@ -242,7 +242,7 @@ foreach ($stmt->get_result()->fetch_all(MYSQLI_ASSOC) as $u) {
         'type'      => 'upload',
         'title'     => $icon . ' Upload ' . strtoupper($u['upload_status']) . ': ' . $u['filename'],
         'desc'      => substr($u['validation_msg'], 0, 120),
-        'link'      => '/icecashRec/utilities/uploaded_files_list.php',
+        'link'      => BASE_URL . '/utilities/uploaded_files_list.php',
         'created_at'=> $u['created_at'],
         'unread'    => $u['created_at'] > $last_read,
     );
@@ -269,7 +269,7 @@ if (in_array($role, array('Manager','Admin'))) {
             'type'      => 'statement',
             'title'     => '📄 New draft statement ' . $s['statement_no'],
             'desc'      => $s['agent_name'] . ' · variance ZWG ' . number_format($s['variance_zwg'], 0),
-            'link'      => '/icecashRec/admin/statement_detail.php?id=' . $s['id'],
+            'link'      => BASE_URL . '/admin/statement_detail.php?id=' . $s['id'],
             'created_at'=> $s['generated_at'],
             'unread'    => $s['generated_at'] > $last_read,
         );

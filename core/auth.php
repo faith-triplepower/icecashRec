@@ -18,10 +18,12 @@ if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
     session_set_cookie_params(0, '/; SameSite=Strict', '', $is_https, true);
     session_start();
 }
-define('BASE_URL',    '/icecashRec');
-define('EXPORT_DIR',  __DIR__ . '/../exports');
-
+// Load DB config first — it pulls BASE_URL from .env (APP_BASE_URL).
+// Our local-dev fallbacks below only apply if .env didn't define them.
 require_once __DIR__ . '/db.php';
+
+if (!defined('BASE_URL'))   define('BASE_URL',   '/icecashRec');
+if (!defined('EXPORT_DIR')) define('EXPORT_DIR', __DIR__ . '/../exports');
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -110,17 +112,26 @@ function current_user(): ?array {
 
 // ── Login ────────────────────────────────────────────────────
 
-function login(string $username, string $password): bool {
+function login(string $username, string $password, bool &$needs_2fa = false, bool &$disabled = false): bool {
     $db  = get_db();
+    // Fetch without the is_active filter so we can distinguish a disabled
+    // account from a non-existent one and show a helpful message.
     $stmt = $db->prepare(
-        "SELECT id, username, full_name, email, password_hash, role, initials
-         FROM users WHERE username = ? AND is_active = 1 LIMIT 1"
+        "SELECT id, username, full_name, email, password_hash, role, initials, is_active
+         FROM users WHERE username = ? LIMIT 1"
     );
     $stmt->bind_param('s', $username);
     $stmt->execute();
     $result = $stmt->get_result();
     $user   = $result->fetch_assoc();
     $stmt->close();
+
+    // Account exists but has been disabled — tell the caller without
+    // leaking whether the password was correct.
+    if ($user && !(int)$user['is_active']) {
+        $disabled = true;
+        return false;
+    }
 
     if (!$user || !password_verify($password, $user['password_hash'])) {
         audit_login_failed($username);
@@ -131,12 +142,21 @@ function login(string $username, string $password): bool {
     // Clear rate-limit failures on successful login
     clear_login_failures($username);
 
-    // ── Fix 4: Session regeneration ─────────────────────────
     // Prevents session fixation: attacker can't pre-set a session ID
     // and reuse it after the victim logs in.
     session_regenerate_id(true);
 
-    // Store in session (never store password_hash)
+    // If user has 2FA enabled, park a pending UID in the session and
+    // return — the caller redirects to verify_2fa.php which completes
+    // the login after the TOTP code is verified.
+    require_once __DIR__ . '/totp.php';
+    if (totp_is_enabled($db, (int)$user['id'])) {
+        $needs_2fa = true;
+        $_SESSION['_2fa_pending_uid'] = (int)$user['id'];
+        return true;
+    }
+
+    // No 2FA — complete the session immediately
     $_SESSION['user'] = [
         'id'       => $user['id'],
         'username' => $user['username'],
@@ -154,11 +174,11 @@ function login(string $username, string $password): bool {
     $upd->execute();
     $upd->close();
 
-    // Audit log
     audit_log($user['id'], 'LOGIN', 'Successful login');
 
     return true;
 }
+
 
 // ── Logout ───────────────────────────────────────────────────
 

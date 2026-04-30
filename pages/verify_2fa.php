@@ -38,9 +38,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['login_time'] = date('Y-m-d H:i:s');
         unset($_SESSION['_2fa_pending_uid']);
 
-        $ip = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : null;
-        $upd = $db->prepare("UPDATE users SET last_login = NOW(), last_login_ip = ? WHERE id = ?");
-        $upd->bind_param('si', $ip, $uid);
+        $upd = $db->prepare("UPDATE users SET last_login = NOW() WHERE id = ?");
+        $upd->bind_param('i', $uid);
         $upd->execute();
         $upd->close();
 

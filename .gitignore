@@ -1,5 +1,4 @@
-# Database credentials — never commit these
-core/config.php
+# Database credentials live in .env (see .env.example); core/config.php only loads them.
 
 # Uploaded files (data goes to DB, not disk)
 uploads/
@@ -25,3 +24,4 @@ desktop.ini
 # XAMPP temp
 /tmp/
 exports/
+.env
