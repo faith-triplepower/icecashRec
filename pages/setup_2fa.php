@@ -15,31 +15,29 @@ $error   = '';
 $success = '';
 $show_setup = false;
 $secret  = '';
-$qr_url  = '';
+$uri     = '';
 
 $is_enabled = totp_is_enabled($db, $uid);
 
 // Handle actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
-    $action = isset($_POST['action']) ? $_POST['action'] : '';
+    $action = $_POST['action'] ?? '';
 
     if ($action === 'begin_setup') {
         $secret = totp_generate_secret();
         $_SESSION['_2fa_setup_secret'] = $secret;
         $show_setup = true;
         $uri = totp_provisioning_uri($secret, $user['username']);
-        $qr_url = totp_qr_url($uri);
 
     } elseif ($action === 'confirm_setup') {
-        $code = trim(isset($_POST['code']) ? $_POST['code'] : '');
-        $secret = isset($_SESSION['_2fa_setup_secret']) ? $_SESSION['_2fa_setup_secret'] : '';
+        $code   = trim($_POST['code'] ?? '');
+        $secret = $_SESSION['_2fa_setup_secret'] ?? '';
         if (!$secret) { $error = 'Setup session expired. Please start again.'; }
         elseif (!totp_verify($secret, $code)) {
             $error = 'Invalid code. Please check your authenticator app and try again.';
             $show_setup = true;
             $uri = totp_provisioning_uri($secret, $user['username']);
-            $qr_url = totp_qr_url($uri);
         } else {
             totp_save_secret($db, $uid, $secret);
             unset($_SESSION['_2fa_setup_secret']);
@@ -49,7 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
     } elseif ($action === 'disable') {
-        $code = trim(isset($_POST['code']) ? $_POST['code'] : '');
+        $code = trim($_POST['code'] ?? '');
         $stored_secret = totp_get_secret($db, $uid);
         if ($stored_secret && totp_verify($stored_secret, $code)) {
             totp_disable($db, $uid);
@@ -71,6 +69,7 @@ $required = totp_is_required_for_role($user['role']);
     <link href="https://fonts.googleapis.com/css?family=Open+Sans:400,600,700" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="../assets/css/login.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
 <div class="wrapper">
@@ -86,10 +85,24 @@ $required = totp_is_required_for_role($user['role']);
 
         <?php if ($show_setup): ?>
         <div style="text-align:center;margin:20px 0">
-            <p style="font-size:13px;color:#555">Scan this QR code with Google Authenticator, Authy, or any TOTP app:</p>
-            <img src="<?= htmlspecialchars($qr_url) ?>" alt="QR Code" style="margin:12px auto;border:4px solid #eee;border-radius:8px">
-            <p style="font-size:11px;color:#888;margin-top:8px">Manual key: <code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;letter-spacing:2px"><?= htmlspecialchars($secret) ?></code></p>
+            <p style="font-size:13px;color:#555;margin-bottom:4px">
+                1. Install <strong>Google Authenticator</strong> or <strong>Authy</strong> on your phone.<br>
+                2. Open the app &rarr; tap <strong>+</strong> &rarr; <strong>Scan QR code</strong>.<br>
+                3. Scan the code below <em>from inside the app</em> (not the camera app).
+            </p>
+            <div id="qrcode" style="display:inline-block;margin:12px auto;padding:8px;background:#fff;border:4px solid #eee;border-radius:8px"></div>
+            <p style="font-size:11px;color:#888;margin-top:4px">
+                Or <a href="<?= htmlspecialchars($uri) ?>" style="color:#007a3d">tap here to open in authenticator app</a><br>
+                Manual key: <code style="background:#f5f5f5;padding:2px 6px;border-radius:3px;letter-spacing:2px"><?= htmlspecialchars($secret) ?></code>
+            </p>
         </div>
+        <script>
+        new QRCode(document.getElementById('qrcode'), {
+            text: <?= json_encode($uri) ?>,
+            width: 200, height: 200,
+            correctLevel: QRCode.CorrectLevel.M
+        });
+        </script>
         <form method="POST">
             <?= csrf_field() ?>
             <input type="hidden" name="action" value="confirm_setup">
